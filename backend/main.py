@@ -24,7 +24,6 @@ from fastapi.staticfiles import StaticFiles
 
 from algo import engine as E
 from backend import config as C
-from backend import consistency as CHECK
 from backend import db as DB
 from backend import dbview as DBVIEW
 from backend import plant as PLANT
@@ -776,19 +775,6 @@ async def api_scenario(body: dict):
                            "t_sim": clock.t_sim}
     await broadcast()
     return {"ok": True}
-
-
-@app.get("/api/db/check")
-async def api_consistency_check():
-    """Read-only consistency badge for the DB Explorer -- see
-    backend/consistency.py. Uses its own query_only connection, same as
-    everything else under /api/db/*."""
-    chk_con = DB.connect()
-    chk_con.execute("PRAGMA query_only = ON")
-    try:
-        return CHECK.run_checks(chk_con, clock.t_sim)
-    finally:
-        chk_con.close()
 
 
 # ---------------------------------------------------------------------------
