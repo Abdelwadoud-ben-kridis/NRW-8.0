@@ -5,6 +5,12 @@ software works perfectly. Print this. Tape it to the table.
 
 **P3 holds the keyboard. The best speaker talks. Never the same person.**
 
+**Before anything else:** change `SESSION` in `backend/config.py` AND
+`firmware/sketch.ino` from `nrw8` to something unique (e.g. `nrw8-team7`) —
+the MQTT broker is public, and the two files must match exactly. Do this
+once, at the venue, and commit it. Skipping this is the single most likely
+way another team's traffic ends up inside this demo.
+
 Before the jury walks up:
 
 ```
@@ -26,8 +32,8 @@ never be empty when they arrive. Six boxes, 34 simulated hours, three cured.
 | 3 | 1:30 | "A box arrives. The plant model breaks a photoelectric barrier core by core and loads a scale. Those raw signals go over MQTT to the ESP32 — **the board is never told the answer**. It tares, debounces, counts, waits for the mass to settle, and reports." | **A** (box arrives) |
 | 4 | 0:50 | "Two independent measurements: 37 by the barrier, 37 by mass ÷ the reference's known unit weight. They agree, so confidence HAUTE. The crane stores it and the clock starts — automatic timestamp, criterion 3." | point at the ESP32 pill and the new crate |
 | 5 | 1:00 | "Now the anomaly. Same box, three cores missing from the mass." → *pick "Écart de comptage de 3"* → "Barrier says 30, scale says 27. Delta 2 or more is **quarantine**. It never enters stock. A wrongly labelled crate is caught the same way: the average core weight would not match the declared reference." | pick the anomaly, **A** |
-| 6 | 1:30 | "Production needs 60 NY-114." → press **D** → "The system proposes BOX-1 then BOX-3 — oldest first. And here is the part that matters: **it tells you what it refused and why**. BOX-5 is rejected, not because it is newer, but because it still needs 9 hours of drying. FIFO you can audit." | **D**, then **C** to confirm |
-| 7 | 1:00 | "The innovation. The 24-hour floor from the cahier des charges is never violated — but a cold, humid room makes resin cure slower, so we extend it. Drag the humidity to 85 %: required cure goes from 24 to over 30 hours. The system can only ask for **more** drying, never less. That is the safe direction." | drag the RH slider, then **J** (+6 h) to show a box crossing to READY |
+| 6 | 1:30 | "Production needs 60 NY-114." → press **D** → "The system proposes BOX-1 then BOX-3 — oldest first. And here is the part that matters: **it tells you what it refused and why**. BOX-5 is rejected, not because it is newer, but because it still needs 9 hours of drying. FIFO you can audit." | **D**, then **C** to confirm — **confirm before doing anything else**: a reservation auto-releases after 2 simulated hours (`LOCK_TTL_H`), and pressing **J** in beat 7 jumps +6 h, which would expire an unconfirmed order in full view of the jury |
+| 7 | 1:00 | *(placeholder — the cahier des charges never asked for a climate-adaptive cure time, and an earlier draft of this beat did; that idea was dropped, see docs/contracts.md CONTRACT VERSION 1.2. Criterion 10 (10 pts, "innovation") needs a replacement beat before the venue.)* One honest option that is already fully built and demonstrable: "The system tells you not just what it will do, but **exactly why it refused everything else** — the FIFO rejected list, per box, per reason — and a built-in consistency checker (`/db`, the green PASS badge) proves the database itself is never in an inconsistent state, live, on demand." | **J** (+6 h) to show a DRYING box crossing to READY; open `/db` to show the consistency badge |
 
 Close: *"Everything you saw ran live. No video, no slides. The embedded board,
 the warehouse logic and the 3D are three separate programs talking over MQTT
