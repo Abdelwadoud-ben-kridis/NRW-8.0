@@ -1,6 +1,7 @@
 """SQLite layer. Thin on purpose: all decisions live in algo/engine.py."""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -34,7 +35,13 @@ CREATE TABLE IF NOT EXISTS slots (
 
 CREATE TABLE IF NOT EXISTS boxes (
   box_id          TEXT PRIMARY KEY,
-  article_ref     TEXT NOT NULL REFERENCES articles(ref),
+  -- Nullable (contract 1.2): an unknown reference is quarantined with
+  -- article_ref = NULL rather than misfiled under a fallback article, so it
+  -- never pollutes that article's by-ref panel or FIFO rejected list. NULL
+  -- is legal ONLY while state='QUARANTINE' -- enforced by
+  -- backend/consistency.py check B6, not by a CHECK constraint, so a plain
+  -- `sqlite3 scw.db` session can still be used for ad-hoc repair.
+  article_ref     TEXT REFERENCES articles(ref),
   qty_initial     INTEGER NOT NULL,
   qty_available   INTEGER NOT NULL,
   slot_id         TEXT REFERENCES slots(slot_id),
@@ -50,6 +57,17 @@ CREATE TABLE IF NOT EXISTS boxes (
   locked_by       TEXT,
   lock_expires_sim REAL
 );
+
+-- A slot holds at most one box, and a box occupies at most one slot -- these
+-- partial unique indexes make that a DB-enforced invariant (NULL is exempt,
+-- so an unslotted/unoccupied row never collides with another). This is what
+-- actually prevents "box claims slot A but slot claims box B" style
+-- corruption; docs/database-guide.md calls these back-references "soft"
+-- because there is no FK pointing back, but they are not unconstrained.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_boxes_slot
+  ON boxes(slot_id) WHERE slot_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_slots_occupied
+  ON slots(occupied_by) WHERE occupied_by IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS orders (
   order_id      TEXT PRIMARY KEY,
@@ -99,27 +117,79 @@ def init(con: sqlite3.Connection) -> None:
     con.commit()
 
 
+# ---------------------------------------------------------------------------
+# Transactions -- every multi-row mutation in backend/warehouse.py runs
+# inside exactly one of these, so a crash or a raised precondition leaves
+# nothing half-written (box.slot_id set but slots.occupied_by not, an order
+# marked DONE but only half its boxes deducted, etc).
+# ---------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def transaction(con: sqlite3.Connection):
+    """One write-locking unit of work: BEGIN IMMEDIATE, commit on a clean
+    exit, rollback on any exception.
+
+    IMMEDIATE acquires the write lock up front instead of at the first
+    write, so this also serialises against another connection on the same
+    file (a stray `sqlite3 scw.db` session, or -- see the plan's assumption
+    register -- a second uvicorn worker) rather than interleaving with it.
+
+    Reentrant: a `transaction()` opened while one is already active (e.g.
+    `seed()` called from inside `warehouse.reset_seed()`'s own transaction)
+    joins the outer one instead of trying to BEGIN twice, and only the
+    outermost call commits or rolls back.
+    """
+    outer = con.in_transaction
+    if not outer:
+        con.execute("BEGIN IMMEDIATE")
+    try:
+        yield con
+        if not outer:
+            con.commit()
+    except Exception:
+        if not outer:
+            con.rollback()
+        raise
+
+
 def slot_id(face: int, col: int, level: int) -> str:
     return "F%d-C%d-L%d" % (face, col, level)
 
 
-def seed(con: sqlite3.Connection) -> None:
-    """Wipe the dynamic tables and lay out a fresh rack (C.SLOT_COUNT slots)."""
-    con.executescript("""
-        DELETE FROM boxes; DELETE FROM orders; DELETE FROM events;
-        DELETE FROM slots; DELETE FROM articles; DELETE FROM meta;
-    """)
-    con.executemany(
-        "INSERT INTO articles(ref,label,unit_mass_g,tolerance_g,box_capacity,color)"
-        " VALUES (?,?,?,?,?,?)", ARTICLES)
-    rows = []
-    for f in range(C.FACES):
-        for c in range(1, C.COLS + 1):
-            for l in range(1, C.LEVELS + 1):
-                rows.append((slot_id(f, c, l), f, c, l))
-    con.executemany(
-        "INSERT INTO slots(slot_id,face,col,level) VALUES (?,?,?,?)", rows)
-    con.commit()
+def seed(con: sqlite3.Connection, keep_articles: bool = False) -> None:
+    """Wipe the dynamic tables and lay out a fresh rack (C.SLOT_COUNT slots).
+
+    Runs as one transaction, so a crash mid-seed cannot leave a fresh
+    `slots` table sitting next to a half-cleared `boxes` table (or vice
+    versa). Also resets the `meta` clock checkpoint (see meta_get/meta_set)
+    so a restart right after a reset restores CLOCK_START_SIM, not whatever
+    was running before.
+
+    `keep_articles=True` implements `POST /api/reset {"seed": false}`
+    (docs/contracts.md §2): wipe boxes/orders/events/slots, but leave
+    whatever is currently in `articles` alone, so a reference added at the
+    venue via "+ New reference" survives a reset.
+    """
+    with transaction(con):
+        con.execute("DELETE FROM boxes")
+        con.execute("DELETE FROM orders")
+        con.execute("DELETE FROM events")
+        con.execute("DELETE FROM slots")
+        if not keep_articles:
+            con.execute("DELETE FROM articles")
+            con.executemany(
+                "INSERT INTO articles(ref,label,unit_mass_g,tolerance_g,box_capacity,color)"
+                " VALUES (?,?,?,?,?,?)", ARTICLES)
+        con.execute("DELETE FROM meta")
+        rows = []
+        for f in range(C.FACES):
+            for c in range(1, C.COLS + 1):
+                for l in range(1, C.LEVELS + 1):
+                    rows.append((slot_id(f, c, l), f, c, l))
+        con.executemany(
+            "INSERT INTO slots(slot_id,face,col,level) VALUES (?,?,?,?)", rows)
+        meta_set(con, "t_sim", C.CLOCK_START_SIM)
+        meta_set(con, "speed", C.DEFAULT_SPEED)
 
 
 # --- tiny helpers ------------------------------------------------------------
@@ -134,9 +204,13 @@ def one(con, sql, args=()) -> dict | None:
 
 
 def log_event(con, t_sim: float, kind: str, payload: dict) -> None:
+    """Insert one audit row. Deliberately does NOT commit -- it is always
+    called from inside a `transaction()` block alongside the mutation it
+    describes, so the event and the state change it explains are atomic
+    (docs/database-guide.md's claim that "every mutation writes one event"
+    is only true once the two cannot be torn apart by a crash)."""
     con.execute("INSERT INTO events(t_sim,kind,payload) VALUES (?,?,?)",
                 (t_sim, kind, json.dumps(payload, ensure_ascii=False)))
-    con.commit()
 
 
 def next_id(con, table: str, col: str, prefix: str) -> str:
@@ -157,12 +231,67 @@ def update(con, table: str, key_col: str, key: str, patch: dict) -> None:
                 list(patch.values()) + [key])
 
 
+def cas_update(con, table: str, key_col: str, key: str,
+              expect: dict, patch: dict) -> int:
+    """Compare-and-set UPDATE: SET `patch` WHERE key_col=key AND every
+    `expect` column still holds the value it named.
+
+    Returns the number of rows changed (0 or 1 for a primary-key `key_col`).
+    This is the primitive behind every guarded transition in
+    backend/warehouse.py -- e.g. reserving a box only if it is still
+    READY and unlocked, or confirming a pick only if the box is still held
+    by the confirming order. The caller checks the return value and raises
+    inside its transaction on 0, so nothing is left half-applied.
+
+    `expect={}` degrades to an unconditional update, same as `update()`.
+    An expected value of None compiles to `col IS NULL`, not `col=?` bound
+    to NULL -- SQL's `= NULL` is never true, for any row, which would make
+    every "expect this column is still unset" check (e.g. reserving a slot
+    that has `occupied_by IS NULL`) silently match zero rows forever.
+    """
+    if not patch:
+        return 0
+    set_sql = ", ".join("%s=?" % k for k in patch)
+    where_parts, where_args = [], []
+    for k, v in expect.items():
+        if v is None:
+            where_parts.append("%s IS NULL" % k)
+        else:
+            where_parts.append("%s=?" % k)
+            where_args.append(v)
+    where_sql = " AND ".join(where_parts) if where_parts else "1=1"
+    sql = "UPDATE %s SET %s WHERE %s=? AND %s" % (table, set_sql, key_col, where_sql)
+    args = list(patch.values()) + [key] + where_args
+    return con.execute(sql, args).rowcount
+
+
+def meta_get(con, key: str, default: str | None = None) -> str | None:
+    """Read one `meta` key. Values are stored as text; the caller converts
+    (float(...) for the clock checkpoint, etc)."""
+    r = one(con, "SELECT v FROM meta WHERE k=?", (key,))
+    return r["v"] if r else default
+
+
+def meta_set(con, key: str, value) -> None:
+    """Write one `meta` key/value pair (insert or overwrite)."""
+    con.execute(
+        "INSERT INTO meta(k,v) VALUES (?,?) "
+        "ON CONFLICT(k) DO UPDATE SET v=excluded.v", (key, str(value)))
+
+
 def add_article(con, ref: str, label: str, unit_mass_g: float,
                 tolerance_g: float | None = None,
-                box_capacity: int = 40, cure_floor_h: float = 24.0,
+                box_capacity: int = 40, cure_floor_h: float | None = None,
                 color: str | None = None) -> dict:
     """Register a new reference/type. Raises ValueError on a bad or
-    duplicate ref -- the caller (the REST handler) turns that into a 400."""
+    duplicate ref -- the caller (the REST handler) turns that into a 400.
+
+    `cure_floor_h` is accepted for API/contract-shape compatibility but
+    IGNORED: contract 1.2 fixes drying at C.CURE_H (24 h) for every box,
+    every reference -- see algo/engine.py::required_cure_h. A caller that
+    passes a different value gets 24 h anyway, not a silent per-reference
+    exception to the CDC's one drying rule.
+    """
     ref = (ref or "").strip()
     label = (label or "").strip()
     if not ref or not label:
@@ -173,15 +302,15 @@ def add_article(con, ref: str, label: str, unit_mass_g: float,
         raise ValueError("masse unitaire doit etre > 0")
     if tolerance_g is None:
         tolerance_g = round(max(1.0, unit_mass_g * 0.03), 1)   # ~3 % default
-    if not color:
-        n = con.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
-        color = NEW_REF_PALETTE[n % len(NEW_REF_PALETTE)]
-    con.execute(
-        "INSERT INTO articles(ref,label,unit_mass_g,tolerance_g,"
-        "box_capacity,cure_floor_h,color) VALUES (?,?,?,?,?,?,?)",
-        (ref, label, float(unit_mass_g), float(tolerance_g),
-         int(box_capacity), float(cure_floor_h), color))
-    con.commit()
+    with transaction(con):
+        if not color:
+            n = con.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+            color = NEW_REF_PALETTE[n % len(NEW_REF_PALETTE)]
+        con.execute(
+            "INSERT INTO articles(ref,label,unit_mass_g,tolerance_g,"
+            "box_capacity,cure_floor_h,color) VALUES (?,?,?,?,?,?,?)",
+            (ref, label, float(unit_mass_g), float(tolerance_g),
+             int(box_capacity), C.CURE_H, color))
     return one(con, "SELECT * FROM articles WHERE ref=?", (ref,))
 
 

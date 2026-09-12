@@ -24,9 +24,11 @@ from fastapi.staticfiles import StaticFiles
 
 from algo import engine as E
 from backend import config as C
+from backend import consistency as CHECK
 from backend import db as DB
 from backend import dbview as DBVIEW
 from backend import plant as PLANT
+from backend import warehouse as W
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DASH = os.path.join(ROOT, "dashboard")
@@ -71,7 +73,7 @@ STATE = {
     "env": {"t_c": 24.0, "rh": 52.0},
     "device": {"online": False, "state": "IDLE", "count_beam": 0,
                "gross_g": 0.0, "stable": False, "last_seen_sim": -1e9,
-               "source": "none"},
+               "last_seen_mono": -1e9, "source": "none"},
     "crane": {"cmd": "idle", "box_id": None, "slot_id": None, "seq": 0},
     "last_order": None,
     "banner": None,
@@ -80,6 +82,16 @@ STATE = {
 
 CLIENTS: set[WebSocket] = set()
 _arrival_lock = asyncio.Lock()
+
+# ---------------------------------------------------------------------------
+# Arrival window / dedup (runtime-only -- see algo.engine.dedup_verdict and
+# docs/contracts.md CONTRACT VERSION 1.2 §1.3). `_epoch` is bumped by reset
+# and scenario-load so an in-flight run_arrival() from before either one
+# aborts instead of storing a box into the freshly wiped database.
+# ---------------------------------------------------------------------------
+_epoch = 0
+_arrival_window: dict | None = None
+_last_unsolicited: tuple | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -148,10 +160,14 @@ mq = Mqtt()
 # ---------------------------------------------------------------------------
 
 def box_view(b: dict, now: float) -> dict:
-    art = DB.one(con, "SELECT * FROM articles WHERE ref=?", (b["article_ref"],)) or {}
+    # article_ref is NULL for an unknown-reference quarantine box (contract
+    # 1.2) -- it no longer gets misfiled under a fallback article, so there
+    # is genuinely no article row to join here.
+    art = (DB.one(con, "SELECT * FROM articles WHERE ref=?", (b["article_ref"],))
+          if b["article_ref"] else None) or {}
     return {
         "box_id": b["box_id"], "ref": b["article_ref"],
-        "label": art.get("label", b["article_ref"]),
+        "label": art.get("label") or (b["reason"] if not b["article_ref"] else b["article_ref"]),
         "color": art.get("color", "#888"),
         "qty_initial": b["qty_initial"], "qty_available": b["qty_available"],
         "slot_id": b["slot_id"], "state": b["state"],
@@ -170,14 +186,24 @@ def box_view(b: dict, now: float) -> dict:
 
 def snapshot() -> dict:
     now = clock.t_sim
-    boxes = DB.rows(con, "SELECT * FROM boxes ORDER BY t_in_sim, box_id")
+    # ORDER BY t_in_sim only -- box_id's numeric tiebreak (E.fifo_key) cannot
+    # be expressed in plain SQL ("BOX-10" < "BOX-2" lexically), so the final
+    # deterministic order is applied in Python, once, here -- the same key
+    # FIFO allocation uses, so the inventory table, the by-ref FIFO head and
+    # the actual allocation never disagree about what "oldest" means.
+    boxes = DB.rows(con, "SELECT * FROM boxes ORDER BY t_in_sim")
+    boxes.sort(key=E.fifo_key)
     views = [box_view(b, now) for b in boxes]
     used = sum(1 for b in boxes if b["slot_id"])
     counts: dict[str, int] = {}
     for b in boxes:
         counts[b["state"]] = counts.get(b["state"], 0) + 1
     dev = dict(STATE["device"])
-    dev["online"] = (now - dev["last_seen_sim"]) < 15 * 60      # 15 sim-minutes
+    # Liveness is transport-domain (monotonic), not simulated time -- the old
+    # "15 sim-minutes" check was wrong at pause (speed 0, stuck "online"
+    # forever), at x3600 (flickers every real 25ms) and right after a reset
+    # (stale "online" until the next telemetry frame catches up in sim time).
+    dev["online"] = (time.monotonic() - dev.get("last_seen_mono", -1e9)) < C.DEVICE_LIVENESS_S
 
     # CDC task 5: "classer les box selon type, quantite et date de stockage".
     # One row per reference, so the jury can read stock by TYPE at a glance,
@@ -186,7 +212,7 @@ def snapshot() -> dict:
     for art in DB.rows(con, "SELECT * FROM articles ORDER BY ref"):
         mine = [v for v in views if v["ref"] == art["ref"]]
         ready = [v for v in mine if v["state"] == "READY"]
-        ready.sort(key=lambda v: (v["t_in_sim"], v["box_id"]))
+        ready.sort(key=E.fifo_key)
         by_ref.append({
             "ref": art["ref"], "label": art["label"], "color": art["color"],
             "unit_mass_g": art["unit_mass_g"],
@@ -201,8 +227,25 @@ def snapshot() -> dict:
             "fifo_head_slot": ready[0]["slot_id"] if ready else None,
             "fifo_head_age_h": ready[0]["age_h"] if ready else None,
         })
+
+    # Every PENDING order, with its lock countdown -- so the HMI can show
+    # (and the presenter can see coming) a reservation about to expire,
+    # instead of only ever showing the single last_order pointer.
+    orders_pending = []
+    for o in DB.rows(con, "SELECT * FROM orders WHERE status='PENDING' "
+                          "ORDER BY created_sim"):
+        plan_o = json.loads(o["payload"])
+        lock_exp = plan_o["picks"][0]["lock_expires_sim"] if plan_o.get("picks") else None
+        orders_pending.append({
+            "order_id": o["order_id"], "ref": o["ref"],
+            "qty_requested": o["qty_requested"], "qty_allocated": o["qty_allocated"],
+            "lock_expires_sim": lock_exp,
+            "lock_remaining_s": round(lock_exp - now, 1) if lock_exp is not None else None,
+        })
+
     return {
         "type": "state",
+        "contract_version": C.CONTRACT_VERSION,
         "t_sim": round(now, 1),
         "speed": clock.speed,
         "clock_label": clock.label(),
@@ -213,6 +256,7 @@ def snapshot() -> dict:
         "banner": STATE["banner"],
         "crane": STATE["crane"],
         "last_order": STATE["last_order"],
+        "orders_pending": orders_pending,
         "kpi": {
             "slots_total": C.SLOT_COUNT,
             "slots_used": used,
@@ -248,79 +292,39 @@ async def broadcast(msg: dict | None = None) -> None:
 
 
 def event(kind: str, payload: dict) -> None:
-    DB.log_event(con, clock.t_sim, kind, payload)
+    """Log a standalone event not already covered by a backend/warehouse.py
+    operation's own transaction (env, clock changes, dedup/validation
+    outcomes, arrival fallback). db.log_event() no longer commits on its
+    own, so this wraps it in its own one-statement transaction."""
+    with DB.transaction(con):
+        DB.log_event(con, clock.t_sim, kind, payload)
 
 
 # ---------------------------------------------------------------------------
 # Storing a box  (called by both the MQTT path and the L1 fallback)
 # ---------------------------------------------------------------------------
+# All the actual database work -- validation, slot assignment, the
+# transaction, the event -- lives in backend/warehouse.py::create_box. This
+# wrapper only updates the runtime STATE (crane cue, banner) that the rest
+# of main.py's HMI plumbing reads, exactly once, after the commit succeeds.
 
-def store_box(ref: str, count_beam: int, gross_g: float, source: str) -> dict:
-    now = clock.t_sim
-    art = DB.one(con, "SELECT * FROM articles WHERE ref=?", (ref,))
-    box_id = DB.next_id(con, "boxes", "box_id", "BOX")
-
-    if art is None:
-        con.execute(
-            "INSERT INTO boxes(box_id,article_ref,qty_initial,qty_available,"
-            "slot_id,state,t_in_sim,required_cure_h,ready_at_sim,count_beam,"
-            "count_weight,gross_g,confidence,reason) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (box_id, ARTICLE_FALLBACK, 0, 0, None, "QUARANTINE", now, 24.0,
-             now + 86400, count_beam, 0, gross_g, "NULLE",
-             "reference inconnue: %s" % ref))
-        con.commit()
-        event("quarantine", {"box_id": box_id, "ref": ref,
-                             "reason": "reference inconnue"})
-        return {"box_id": box_id, "state": "QUARANTINE"}
-
-    verdict = E.assess_box(art, count_beam, gross_g)
-    env = STATE["env"]
-    req_h = E.required_cure_h(env["t_c"], env["rh"], art["cure_floor_h"])
-
-    slot = None
-    if verdict["accepted"]:
-        free = DB.rows(con, "SELECT * FROM slots WHERE occupied_by IS NULL "
-                            "AND reserved_for IS NULL")
-        slot = E.choose_slot(free, ref)
-
-    state = "DRYING" if (verdict["accepted"] and slot) else verdict["state"]
-    if verdict["accepted"] and not slot:
-        state, verdict["reason"] = "QUARANTINE", "aucun emplacement libre"
-
-    qty = verdict["quantity"]
-    con.execute(
-        "INSERT INTO boxes(box_id,article_ref,qty_initial,qty_available,slot_id,"
-        "state,t_in_sim,required_cure_h,ready_at_sim,count_beam,count_weight,"
-        "gross_g,confidence,reason) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (box_id, ref, qty, qty, slot["slot_id"] if slot else None, state, now,
-         req_h, now + req_h * 3600.0, verdict["count_beam"],
-         verdict["count_weight"], gross_g, verdict["confidence"],
-         verdict.get("reason")))
-    if slot:
-        con.execute("UPDATE slots SET occupied_by=? WHERE slot_id=?",
-                    (box_id, slot["slot_id"]))
-    con.commit()
-
-    STATE["crane"] = {"cmd": "store", "box_id": box_id,
-                      "slot_id": slot["slot_id"] if slot else None,
+def store_box(ref: str, count_beam: int, gross_g: float, source: str,
+             t_c: float | None = None, rh: float | None = None,
+             fw: str | None = None) -> dict:
+    res = W.create_box(con, clock.t_sim, ref, count_beam, gross_g, source,
+                       t_c, rh, fw)
+    STATE["crane"] = {"cmd": "store", "box_id": res["box_id"],
+                      "slot_id": res["slot"]["slot_id"] if res.get("slot") else None,
                       "seq": STATE["crane"]["seq"] + 1}
-    event("box_in", {"box_id": box_id, "ref": ref, "qty": qty,
-                     "slot": slot["slot_id"] if slot else None,
-                     "state": state, "confidence": verdict["confidence"],
-                     "delta": verdict["delta"], "source": source,
-                     "required_cure_h": round(req_h, 1)})
     STATE["banner"] = {
-        "kind": "quarantine" if state == "QUARANTINE" else "ok",
-        "text": (verdict.get("reason") or
+        "kind": "quarantine" if res["state"] == "QUARANTINE" else "ok",
+        "text": (res.get("reason") or
                  "%s stocke en %s — %d noyaux, sechage %.1f h"
-                 % (box_id, slot["slot_id"] if slot else "-", qty, req_h)),
-        "t_sim": now,
+                 % (res["box_id"], res["slot"]["slot_id"] if res.get("slot") else "-",
+                    res.get("quantity", 0), E.required_cure_h())),
+        "t_sim": clock.t_sim,
     }
-    return {"box_id": box_id, "state": state, "slot": slot, **verdict}
-
-
-ARTICLE_FALLBACK = DB.ARTICLES[0][0]
+    return res
 
 
 # ---------------------------------------------------------------------------
@@ -328,55 +332,138 @@ ARTICLE_FALLBACK = DB.ARTICLES[0][0]
 # ---------------------------------------------------------------------------
 
 async def loop_clock() -> None:
-    """Advance simulated time and let boxes cure / locks expire."""
+    """Advance simulated time; let boxes cure and reservation locks expire.
+
+    Wrapped in try/except: a bad row or a transient DB error here must
+    never kill this task silently (finding F2) -- curing and lock expiry
+    would simply stop happening for the rest of the demo with no visible
+    sign until someone notices boxes never turning READY.
+    """
+    tick_n = 0
     while True:
-        now = clock.tick()
-        changed = False
-        for b in DB.rows(con, "SELECT * FROM boxes WHERE state IN "
-                              "('DRYING','RESERVED')"):
-            patch = E.tick_box(b, now)
-            if patch:
-                DB.update(con, "boxes", "box_id", b["box_id"], patch)
-                changed = True
-                if patch.get("state") == "READY" and b["state"] == "DRYING":
-                    event("cured", {"box_id": b["box_id"],
-                                    "after_h": round(b["required_cure_h"], 1)})
-        if changed:
-            con.commit()
+        try:
+            now = clock.tick()
+            cured = W.sweep_cured(con, now)
+            expired = W.sweep_expired(con, now)
+            for e in expired:
+                if STATE["last_order"] and STATE["last_order"].get("order_id") == e["order_id"]:
+                    STATE["last_order"]["status"] = "CANCELLED"
+                STATE["banner"] = {
+                    "kind": "quarantine",
+                    "text": "%s expiree: reservation non confirmee a temps"
+                           % e["order_id"], "t_sim": now}
+            tick_n += 1
+            if cured or expired or tick_n % 25 == 0:   # ~every 5 real seconds
+                W.checkpoint_clock(con, now, clock.speed)
+        except Exception as exc:                        # pragma: no cover
+            print("[loop_clock] error (continuing): %s" % exc)
         await asyncio.sleep(0.2)
 
 
 async def loop_ws() -> None:
     while True:
-        await broadcast()
+        try:
+            await broadcast()
+        except Exception as exc:                        # pragma: no cover
+            print("[loop_ws] error (continuing): %s" % exc)
         await asyncio.sleep(1.0 / C.WS_HZ)
+
+
+def _validate_box_done(payload: dict) -> str | None:
+    """Return an error string, or None if the payload is well-formed enough
+    to attempt dedup + creation. Anything that fails this must not reach
+    warehouse.create_box -- and must not raise inside loop_mqtt_in either
+    (finding F2: a malformed message on the public broker, from another
+    team's device or a typo in a hand-crafted test message, must not stop
+    telemetry/curing/WS for the rest of the session)."""
+    if not isinstance(payload, dict):
+        return "payload is not a JSON object"
+    ref = payload.get("ref")
+    if not isinstance(ref, str) or not (0 < len(ref) <= 24):
+        return "ref must be a non-empty string <= 24 chars"
+    cb = payload.get("count_beam", 0)
+    if isinstance(cb, bool) or not isinstance(cb, (int, float)) or not (0 <= cb <= 1000):
+        return "count_beam must be a number in [0, 1000]"
+    gg = payload.get("gross_g", 0)
+    if isinstance(gg, bool) or not isinstance(gg, (int, float)) or not (0 <= gg <= 30000):
+        return "gross_g must be a number in [0, 30000]"
+    return None
+
+
+async def handle_box_done(payload: dict) -> None:
+    """One physical box_done -> at most one database box (contract 1.2
+    §1.3). See algo.engine.dedup_verdict for the pure decision core; this
+    function owns the runtime arrival window and the monotonic clock that
+    feed it.
+    """
+    global _last_unsolicited
+    err = _validate_box_done(payload)
+    if err:
+        event("box_done_invalid", {"error": err,
+                                   "raw_keys": list(payload.keys())
+                                   if isinstance(payload, dict) else None})
+        return
+
+    ref = payload["ref"]
+    count_beam = int(payload.get("count_beam", 0))
+    gross_g = float(payload.get("gross_g", 0.0))
+    fw = payload.get("fw")
+    t_c = payload.get("t_c")
+    rh = payload.get("rh")
+    fp = E.box_fingerprint(ref, count_beam, gross_g, fw)
+    now_mono = time.monotonic()
+
+    STATE["device"]["last_seen_sim"] = clock.t_sim
+    STATE["device"]["last_seen_mono"] = now_mono
+
+    verdict = E.dedup_verdict(_arrival_window, fp, ref, now_mono,
+                              _last_unsolicited, C.ARRIVAL_GRACE_S,
+                              C.UNSOLICITED_DEDUP_S)
+    if verdict["action"] == "ignore":
+        event("box_done_ignored", {"ref": ref, "count_beam": count_beam,
+                                   "gross_g": round(gross_g, 1),
+                                   "reason": verdict["reason"]})
+        print("[box_done] ignored duplicate: %s (%s)" % (ref, verdict["reason"]))
+        return
+
+    if _arrival_window is None:
+        _last_unsolicited = (fp, now_mono)
+
+    res = store_box(ref, count_beam, gross_g, source="esp32", t_c=t_c, rh=rh, fw=fw)
+
+    if verdict["action"] == "resolve_window" and _arrival_window is not None:
+        _arrival_window["status"] = "RESOLVED_L0"
+        _arrival_window["resolved_at"] = now_mono
+        _arrival_window["box_id"] = res["box_id"]
+
+    await broadcast()
+    print("[box_done] %s -> %s" % (ref, res["state"]))
 
 
 async def loop_mqtt_in() -> None:
     while True:
         topic, payload = await mq.inbox.get()
-        if topic == C.T_TELEMETRY:
-            STATE["device"].update({
-                "state": payload.get("state", "IDLE"),
-                "count_beam": payload.get("count_beam", 0),
-                "gross_g": payload.get("gross_g", 0.0),
-                "stable": payload.get("stable", False),
-                "last_seen_sim": clock.t_sim,
-                "source": payload.get("src", "esp32"),
-            })
-            if "t_c" in payload and payload["t_c"] is not None:
-                STATE["env"] = {"t_c": payload["t_c"], "rh": payload["rh"]}
-        elif topic == C.T_BOX_DONE:
-            STATE["device"]["last_seen_sim"] = clock.t_sim
-            res = store_box(payload.get("ref", ""),
-                            int(payload.get("count_beam", 0)),
-                            float(payload.get("gross_g", 0.0)),
-                            source="esp32")
-            await broadcast()
-            print("[box_done] %s -> %s" % (payload.get("ref"), res["state"]))
-
-
-_DEVICE_ANSWER = asyncio.Event()
+        try:
+            if not isinstance(payload, dict):
+                continue
+            if topic == C.T_TELEMETRY:
+                STATE["device"].update({
+                    "state": payload.get("state", "IDLE"),
+                    "count_beam": payload.get("count_beam", 0),
+                    "gross_g": payload.get("gross_g", 0.0),
+                    "stable": payload.get("stable", False),
+                    "last_seen_sim": clock.t_sim,
+                    "last_seen_mono": time.monotonic(),
+                    "source": payload.get("src", "esp32"),
+                })
+                if "t_c" in payload and payload["t_c"] is not None:
+                    STATE["env"] = {"t_c": payload["t_c"], "rh": payload["rh"]}
+            elif topic == C.T_BOX_DONE:
+                await handle_box_done(payload)
+        except Exception as exc:                        # pragma: no cover
+            # One bad/foreign message on the shared public broker must never
+            # take telemetry or box arrivals down for the rest of the demo.
+            print("[loop_mqtt_in] error handling %s (continuing): %s" % (topic, exc))
 
 
 async def run_arrival(ref: str, qty: int, anomaly: str = "none") -> dict:
@@ -385,18 +472,28 @@ async def run_arrival(ref: str, qty: int, anomaly: str = "none") -> dict:
     L0: the ESP32 is listening, counts, and answers on scw/<S>/dev/box_done.
     L1: no answer within the timeout -> the backend does the ESP32's arithmetic
         itself and stores the box anyway. Identical screen, demo never dies.
+
+    Opens an arrival window (see algo.engine.dedup_verdict) so a device
+    answer that lands AFTER the L1 grace period is recognised as the same
+    physical box, not a second one (finding F3) -- and checks `_epoch`
+    after every frame so a reset/scenario mid-arrival aborts cleanly instead
+    of storing a box into a database that was just wiped (finding F6).
     """
+    global _arrival_window
     async with _arrival_lock:
         art = DB.one(con, "SELECT * FROM articles WHERE ref=?", (ref,))
         if art is None:
             return {"error": "unknown ref"}
         frames = PLANT.build_arrival(art, qty, anomaly)
+        my_epoch = _epoch
+        _arrival_window = {"ref": ref, "status": "OPEN", "resolved_at": None,
+                           "box_id": None}
 
         mq.pub(C.T_CMD, {"cmd": "start_box", "ref": ref})
-        _DEVICE_ANSWER.clear()
-        before = con.execute("SELECT COUNT(*) FROM boxes").fetchone()[0]
 
         for f in frames:
+            if _epoch != my_epoch:
+                return {"mode": "aborted", "reason": "reset during arrival"}
             f = dict(f, t_c=STATE["env"]["t_c"], rh=STATE["env"]["rh"],
                      t_sim=round(clock.t_sim, 1))
             mq.pub(C.T_RAW, f)
@@ -406,16 +503,25 @@ async def run_arrival(ref: str, qty: int, anomaly: str = "none") -> dict:
         # give the board a moment to declare the box
         for _ in range(25):
             await asyncio.sleep(0.1)
-            if con.execute("SELECT COUNT(*) FROM boxes").fetchone()[0] > before:
+            if _epoch != my_epoch:
+                return {"mode": "aborted", "reason": "reset during arrival"}
+            if _arrival_window["status"] != "OPEN":
                 STATE["mode"] = "L0"
-                return {"mode": "L0"}
+                return {"mode": "L0", "box_id": _arrival_window.get("box_id")}
 
         # --- L1 fallback: byte-identical outcome, computed here --------------
         STATE["mode"] = "L1"
         beam = sum(1 for i, f in enumerate(frames)
                    if f["beam"] == 0 and (i == 0 or frames[i - 1]["beam"] == 1))
         gross = PLANT.final_gross_g(frames)
-        res = store_box(ref, beam, gross, source="L1")
+        res = store_box(ref, beam, gross, source="L1",
+                        t_c=STATE["env"]["t_c"], rh=STATE["env"]["rh"])
+        _arrival_window["status"] = "RESOLVED_L1"
+        _arrival_window["resolved_at"] = time.monotonic()
+        _arrival_window["box_id"] = res["box_id"]
+        event("arrival_fallback", {"ref": ref, "qty": qty, "anomaly": anomaly,
+                                   "box_id": res["box_id"],
+                                   "reason": "no device answer within grace period"})
         await broadcast()
         return {"mode": "L1", **{k: v for k, v in res.items() if k != "slot"}}
 
@@ -438,20 +544,22 @@ async def api_articles():
 async def api_articles_add(body: dict):
     """Register a new reference/type from the dashboard's "+ New reference"
     form. Everything downstream (dropdowns, FIFO, the twin) reads articles
-    from the DB at runtime, so nothing else needs to know this ran."""
+    from the DB at runtime, so nothing else needs to know this ran.
+
+    `cure_floor_h` is no longer accepted from the request: contract 1.2
+    fixes drying at C.CURE_H for every reference (see
+    backend/db.py::add_article for why it would be ignored anyway).
+    """
     try:
-        art = DB.add_article(
-            con, ref=body.get("ref", ""), label=body.get("label", ""),
+        art = W.register_article(
+            con, clock.t_sim, ref=body.get("ref", ""), label=body.get("label", ""),
             unit_mass_g=float(body.get("unit_mass_g", 0) or 0),
             tolerance_g=(float(body["tolerance_g"])
                         if body.get("tolerance_g") not in (None, "") else None),
             box_capacity=int(body.get("box_capacity", 40) or 40),
-            cure_floor_h=float(body.get("cure_floor_h", 24.0) or 24.0),
             color=body.get("color") or None)
     except (ValueError, TypeError) as e:
         return JSONResponse({"error": str(e)}, 400)
-    event("article_new", {"ref": art["ref"], "label": art["label"],
-                          "unit_mass_g": art["unit_mass_g"]})
     await broadcast()
     return art
 
@@ -469,12 +577,32 @@ async def api_anomalies():
 @app.post("/api/clock")
 async def api_clock(body: dict):
     if "speed" in body:
+        try:
+            speed = float(body["speed"])
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "speed must be a number"}, 400)
+        if speed not in C.ALLOWED_SPEEDS:
+            return JSONResponse(
+                {"error": "speed must be one of %s" % (C.ALLOWED_SPEEDS,)}, 400)
         clock.tick()
-        clock.speed = max(0.0, float(body["speed"]))
+        clock.speed = speed
+        event("clock_speed", {"speed": speed})
     if "jump_h" in body:
+        try:
+            hours = float(body["jump_h"])
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "jump_h must be a number"}, 400)
+        # Bounded and strictly positive (finding: unvalidated jump_h could
+        # go negative, running the clock backwards -- contract §6.1's "no
+        # wall clock" rule is only half the guarantee; sim time also must
+        # never run backwards).
+        if not (0 < hours <= C.MAX_JUMP_H):
+            return JSONResponse(
+                {"error": "jump_h must be in (0, %.0f]" % C.MAX_JUMP_H}, 400)
         clock.tick()
-        clock.jump(float(body["jump_h"]))
-        event("clock_jump", {"hours": body["jump_h"]})
+        clock.jump(hours)
+        event("clock_jump", {"hours": hours})
+    W.checkpoint_clock(con, clock.t_sim, clock.speed)
     await broadcast()
     return {"t_sim": clock.t_sim, "speed": clock.speed}
 
@@ -507,7 +635,8 @@ async def api_sim_box(body: dict):
     qty = int(body.get("qty", 37))
     art = DB.one(con, "SELECT * FROM articles WHERE ref=?", (ref,))
     gross = C.TARE_G + qty * (art["unit_mass_g"] if art else 200.0)
-    res = store_box(ref, qty, gross, source="manual")
+    res = store_box(ref, qty, gross, source="manual",
+                    t_c=STATE["env"]["t_c"], rh=STATE["env"]["rh"])
     await broadcast()
     return {k: v for k, v in res.items() if k != "slot"}
 
@@ -525,80 +654,59 @@ async def api_raw(body: dict):
 @app.post("/api/demand")
 async def api_demand(body: dict):
     """Criterion 6: production asks for N cores of a reference."""
-    ref = body["ref"]
-    qty = int(body["qty"])
-    now = clock.t_sim
-    boxes = DB.rows(con, "SELECT * FROM boxes")
-    order_id = DB.next_id(con, "orders", "order_id", "ORD")
-    plan = E.fifo_allocate(boxes, ref, qty, now, order_id)
+    ref = body.get("ref")
+    if not ref:
+        return JSONResponse({"error": "ref is required"}, 400)
+    try:
+        qty = int(body["qty"])
+    except (KeyError, TypeError, ValueError):
+        return JSONResponse({"error": "qty is required (integer)"}, 400)
+    if qty <= 0:
+        return JSONResponse({"error": "qty must be > 0"}, 400)
 
-    # reserve what we plan to take, with a real lock and a real expiry
-    for p in plan["picks"]:
-        DB.update(con, "boxes", "box_id", p["box_id"],
-                  {"state": "RESERVED", "locked_by": order_id,
-                   "lock_expires_sim": now + E.LOCK_TTL_H * 3600.0})
-    con.execute("INSERT INTO orders(order_id,ref,qty_requested,qty_allocated,"
-                "status,created_sim,payload) VALUES (?,?,?,?,?,?,?)",
-                (order_id, ref, qty, plan["qty_allocated"], plan["status"],
-                 now, json.dumps(plan, ensure_ascii=False)))
-    con.commit()
+    plan = W.reserve(con, clock.t_sim, ref, qty)
     STATE["last_order"] = plan
     if plan["picks"]:
         STATE["crane"] = {"cmd": "pick", "box_id": plan["picks"][0]["box_id"],
                           "slot_id": plan["picks"][0]["slot_id"],
                           "seq": STATE["crane"]["seq"] + 1}
-    event("demand", {"order_id": order_id, "ref": ref, "qty": qty,
-                     "allocated": plan["qty_allocated"],
-                     "picks": [p["box_id"] for p in plan["picks"]],
-                     "rejected": len(plan["rejected"])})
     await broadcast()
     return plan
 
 
 @app.post("/api/demand/confirm")
 async def api_confirm(body: dict):
-    oid = body["order_id"]
+    oid = body.get("order_id")
+    if not oid:
+        return JSONResponse({"error": "order_id is required"}, 400)
+    try:
+        res = W.confirm(con, clock.t_sim, oid)
+    except W.OpError as e:
+        return JSONResponse({"error": e.message}, e.code)
+
     row = DB.one(con, "SELECT * FROM orders WHERE order_id=?", (oid,))
-    if not row:
-        return JSONResponse({"error": "unknown order"}, 404)
     plan = json.loads(row["payload"])
-    for p in plan["picks"]:
-        b = DB.one(con, "SELECT * FROM boxes WHERE box_id=?", (p["box_id"],))
-        if not b:
-            continue
-        patch = E.apply_pick(b, p["take"])
-        DB.update(con, "boxes", "box_id", b["box_id"], patch)
-        if patch["state"] == "EMPTY" and b["slot_id"]:
-            con.execute("UPDATE slots SET occupied_by=NULL WHERE slot_id=?",
-                        (b["slot_id"],))
-            DB.update(con, "boxes", "box_id", b["box_id"], {"slot_id": None})
-    con.execute("UPDATE orders SET status='DONE' WHERE order_id=?", (oid,))
-    con.commit()
-    plan["status"] = "DONE"
     STATE["last_order"] = plan
-    STATE["banner"] = {"kind": "ok", "text": "%s servie: %d noyaux preleves"
-                       % (oid, plan["qty_allocated"]), "t_sim": clock.t_sim}
-    event("pick_done", {"order_id": oid, "qty": plan["qty_allocated"]})
+    if not res["already"]:
+        STATE["banner"] = {"kind": "ok", "text": "%s servie: %d noyaux preleves"
+                           % (oid, plan["qty_allocated"]), "t_sim": clock.t_sim}
     await broadcast()
-    return {"ok": True}
+    return res
 
 
 @app.post("/api/demand/cancel")
 async def api_cancel(body: dict):
-    oid = body["order_id"]
-    row = DB.one(con, "SELECT * FROM orders WHERE order_id=?", (oid,))
-    if not row:
-        return JSONResponse({"error": "unknown order"}, 404)
-    plan = json.loads(row["payload"])
-    for p in plan["picks"]:
-        DB.update(con, "boxes", "box_id", p["box_id"],
-                  {"state": "READY", "locked_by": None, "lock_expires_sim": None})
-    con.execute("UPDATE orders SET status='CANCELLED' WHERE order_id=?", (oid,))
-    con.commit()
-    STATE["last_order"] = None
-    event("order_cancel", {"order_id": oid})
+    oid = body.get("order_id")
+    if not oid:
+        return JSONResponse({"error": "order_id is required"}, 400)
+    try:
+        res = W.cancel(con, clock.t_sim, oid)
+    except W.OpError as e:
+        return JSONResponse({"error": e.message}, e.code)
+    if STATE["last_order"] and STATE["last_order"].get("order_id") == oid:
+        STATE["last_order"] = None
     await broadcast()
-    return {"ok": True}
+    return res
 
 
 @app.get("/api/events")
@@ -611,13 +719,30 @@ async def api_events(limit: int = 200):
 
 @app.post("/api/reset")
 async def api_reset(body: dict | None = None):
-    DB.seed(con)
+    """Wipe + reseed. `{"seed": false}` keeps whatever is currently in
+    `articles` instead of resetting to the four demo references (contract
+    §2 -- previously accepted and silently ignored)."""
+    global _epoch, _arrival_window, _last_unsolicited
+    keep_articles = bool(body) and body.get("seed") is False
+
+    _epoch += 1                      # abort any in-flight run_arrival (F6)
+    _arrival_window = None
+    _last_unsolicited = None
+
+    W.reset_all(con, keep_articles=keep_articles)
+    mq.pub(C.T_CMD, {"cmd": "reset"})   # tell a half-counted board to discard its box
+
     clock.t_sim = C.CLOCK_START_SIM
+    clock.speed = C.DEFAULT_SPEED
     STATE["env"] = {"t_c": 24.0, "rh": 52.0}
     STATE["last_order"] = None
-    STATE["banner"] = {"kind": "ok", "text": "Systeme reinitialise",
-                       "t_sim": 0.0}
-    STATE["crane"] = {"cmd": "idle", "box_id": None, "slot_id": None, "seq": 0}
+    STATE["banner"] = {"kind": "ok", "text": "Systeme reinitialise", "t_sim": 0.0}
+    STATE["crane"] = {"cmd": "idle", "box_id": None, "slot_id": None,
+                      "seq": STATE["crane"]["seq"]}
+    STATE["device"].update({"online": False, "state": "IDLE", "count_beam": 0,
+                            "gross_g": 0.0, "stable": False,
+                            "last_seen_sim": -1e9, "last_seen_mono": -1e9})
+    STATE["mode"] = "L0"
     await broadcast()
     return {"ok": True}
 
@@ -627,30 +752,43 @@ async def api_scenario(body: dict):
     """One button that fills the warehouse with a believable history.
 
     Press it before the jury arrives so the rack is not empty and FIFO has
-    something to be right about.
+    something to be right about. Fixed 24 h cure (contract 1.2): at 34
+    simulated hours, the three boxes stored in the first 10 h are READY and
+    the three stored after are still DRYING -- see
+    backend/warehouse.py::_SCENARIO_PLAN.
     """
+    global _epoch, _arrival_window, _last_unsolicited
     name = body.get("name", "demo")
     if name == "demo":
-        DB.seed(con)
-        clock.t_sim = 0.0
-        # 22 C / 45 % RH -> the adaptive model lands exactly on the 24 h floor,
-        # so the arithmetic on screen is one the jury can check in their head.
+        _epoch += 1
+        _arrival_window = None
+        _last_unsolicited = None
+        result = W.load_demo_scenario(con)
+        clock.t_sim = result["t_sim"]
+        clock.speed = result["speed"]
         STATE["env"] = {"t_c": 22.0, "rh": 45.0}
-        plan = [("NY-114", 40, 0.0), ("NY-220", 24, 3.0), ("NY-114", 28, 7.0),
-                ("NY-075", 55, 11.0), ("NY-114", 40, 19.0), ("NY-330", 12, 22.0)]
-        for ref, qty, at_h in plan:
-            clock.t_sim = at_h * 3600.0
-            art = DB.one(con, "SELECT * FROM articles WHERE ref=?", (ref,))
-            store_box(ref, qty, C.TARE_G + qty * art["unit_mass_g"], "scenario")
-        # t = 34 h: BOX-1/2/3 are cured, BOX-4/5/6 are not. That mix is the
-        # whole point -- FIFO has something to choose AND something to refuse.
-        clock.t_sim = 34.0 * 3600.0
+        STATE["last_order"] = None
+        STATE["crane"] = {"cmd": "idle", "box_id": None, "slot_id": None,
+                          "seq": STATE["crane"]["seq"]}
         STATE["banner"] = {"kind": "ok",
                            "text": "Scenario charge: 6 box, 34 h simulees "
                                    "(3 prets, 3 en sechage)",
                            "t_sim": clock.t_sim}
     await broadcast()
     return {"ok": True}
+
+
+@app.get("/api/db/check")
+async def api_consistency_check():
+    """Read-only consistency badge for the DB Explorer -- see
+    backend/consistency.py. Uses its own query_only connection, same as
+    everything else under /api/db/*."""
+    chk_con = DB.connect()
+    chk_con.execute("PRAGMA query_only = ON")
+    try:
+        return CHECK.run_checks(chk_con, clock.t_sim)
+    finally:
+        chk_con.close()
 
 
 # ---------------------------------------------------------------------------
@@ -704,12 +842,25 @@ async def on_start():
     if not DB.rows(con, "SELECT 1 FROM slots LIMIT 1"):
         DB.seed(con)
         print("[db] fresh database seeded")
+
+    # Restore the simulated clock from its last checkpoint (finding F8: a
+    # restart used to silently rewind to CLOCK_START_SIM while every box
+    # kept its old t_in_sim, making READY boxes look uncured and losing the
+    # pending order from the HMI).
+    clock.t_sim, clock.speed = W.restore_clock(con)
+    row = DB.one(con, "SELECT * FROM orders WHERE status='PENDING' "
+                      "ORDER BY created_sim DESC LIMIT 1")
+    if row:
+        STATE["last_order"] = json.loads(row["payload"])
+    print("[clock] restored t_sim=%.1f speed=%.0f" % (clock.t_sim, clock.speed))
+
     loop = asyncio.get_running_loop()
     mq.start(loop)
     asyncio.create_task(loop_clock())
     asyncio.create_task(loop_ws())
     asyncio.create_task(loop_mqtt_in())
-    print("[scw] dashboard on http://localhost:8000   session=%s" % C.SESSION)
+    print("[scw] dashboard on http://localhost:8000   session=%s   contract=%s"
+         % (C.SESSION, C.CONTRACT_VERSION))
 
 
 if __name__ == "__main__":
