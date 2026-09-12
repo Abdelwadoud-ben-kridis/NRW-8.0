@@ -14,8 +14,8 @@ export const EN = {
   plant: "Plant model — core arrival",
   article: "Reference", qty: "Quantity", anomaly: "Inject anomaly",
   arrive: "Box arrives on conveyor", quickBox: "Quick box, no ESP32",
-  env: "Curing room climate", temp: "Temperature", hum: "Humidity",
-  cureNow: "Required cure now",
+  env: "Curing room climate (monitoring)", temp: "Temperature", hum: "Humidity",
+  cureNow: "Cure requirement (fixed)",
   demand: "Production demand", ask: "Request cores",
   confirm: "Confirm pick", cancel: "Cancel",
   proposal: "Automatic proposal (FIFO)",
@@ -23,6 +23,8 @@ export const EN = {
   noOrder: "No order yet. Ask production for cores.",
   shortfall: "Shortfall", allocated: "Allocated", requested: "Requested",
   warehouse: "Warehouse",
+  pendingOrders: "Pending reservations", lockExpiresIn: (s) => `expires in ${s} s`,
+  lockExpired: "expired",
   kpiSlots: "Slots used", kpiReady: "Ready", kpiDrying: "Drying",
   kpiQuar: "Quarantine", kpiCores: "Cores ready", kpiFree: "Free slots",
   inventory: "Inventory", box: "Box", ref: "Ref", state: "State",
@@ -41,11 +43,15 @@ export const EN = {
     PICKING: "Picking", EMPTY: "Empty", ARCHIVED: "Archived",
     QUARANTINE: "Quarantine",
   },
-  // event-log kinds, from the `event(...)` calls in backend/main.py
+  // event-log kinds, from backend/warehouse.py and backend/main.py's event()
   ev: {
     box_in: "stored", quarantine: "quarantine", cured: "cured",
     demand: "demand", pick_done: "picked", order_cancel: "cancelled",
-    clock_jump: "clock", env: "climate", article_new: "new reference",
+    order_expired: "reservation expired", clock_jump: "clock",
+    clock_speed: "speed", env: "climate", article_new: "new reference",
+    box_done_ignored: "duplicate ignored", box_done_invalid: "invalid message",
+    arrival_fallback: "L1 fallback", system_reset: "reset",
+    scenario_loaded: "scenario loaded",
   },
   // The decision engine authors its rejection vocabulary in French (it is
   // P2's territory and algo/test_engine.py asserts on the exact strings), so
@@ -91,8 +97,8 @@ export const FR = {
   plant: "Modèle physique",
   article: "Référence", qty: "Quantité", anomaly: "Injecter une anomalie",
   arrive: "Le box arrive sur le convoyeur", quickBox: "Box rapide, sans ESP32",
-  env: "Climat de la zone de séchage", temp: "Température", hum: "Humidité",
-  cureNow: "Séchage requis actuel",
+  env: "Climat de la zone de séchage (suivi)", temp: "Température", hum: "Humidité",
+  cureNow: "Séchage requis (fixe)",
   demand: "Demande de production", ask: "Demander des noyaux",
   confirm: "Valider", cancel: "Annuler",
   proposal: "Proposition automatique (FIFO)",
@@ -100,6 +106,8 @@ export const FR = {
   noOrder: "Aucune commande. Exprimez un besoin de production.",
   shortfall: "Manquant", allocated: "Alloué", requested: "Demandé",
   warehouse: "Entrepôt",
+  pendingOrders: "Réservations en attente",
+  lockExpiresIn: (s) => `expire dans ${s} s`, lockExpired: "expirée",
   kpiSlots: "Emplacements", kpiReady: "Prêts", kpiDrying: "En séchage",
   kpiQuar: "Quarantaine", kpiCores: "Noyaux prêts", kpiFree: "Emplacements libres",
   inventory: "Inventaire", box: "Box", ref: "Réf", state: "État",
@@ -121,7 +129,11 @@ export const FR = {
   ev: {
     box_in: "stocké", quarantine: "quarantaine", cured: "séché",
     demand: "demande", pick_done: "prélevé", order_cancel: "annulée",
-    clock_jump: "horloge", env: "climat", article_new: "nouvelle référence",
+    order_expired: "réservation expirée", clock_jump: "horloge",
+    clock_speed: "vitesse", env: "climat", article_new: "nouvelle référence",
+    box_done_ignored: "doublon ignoré", box_done_invalid: "message invalide",
+    arrival_fallback: "repli L1", system_reset: "réinitialisation",
+    scenario_loaded: "scénario chargé",
   },
   // In FR the engine's own wording is already correct — this map only
   // restores the accents it cannot carry through MQTT/SQLite safely.

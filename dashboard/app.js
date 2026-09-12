@@ -10,13 +10,32 @@ const api = (path, body) =>
     method: body === undefined ? "GET" : "POST",
     headers: { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
-  }).then((r) => r.json());
+  }).then((r) => r.json()).then((res) => {
+    // A refused operation (backend/warehouse.py::OpError -> 400/404/409)
+    // still resolves as JSON with an `error` field -- surface it on the
+    // banner instead of failing silently, so a double-press or a stale
+    // order shows something instead of nothing happening.
+    if (res && res.error) {
+      const el = $("banner");
+      el.className = "quarantine";
+      el.textContent = res.error;
+      clearTimeout(el._t);
+      el._t = setTimeout(() => { el.className = ""; }, 6000);
+    }
+    return res;
+  });
 
 let ST = null;            // latest snapshot
 let ARTICLES = [];
 let lastBannerT = -1;
 let lastOrderId = null;
 let firstRender = true;
+// True while a confirm/cancel round trip is in flight -- keeps the buttons
+// disabled even though the 5 Hz WS snapshot arriving mid-request still
+// shows the order as PENDING (the backend is idempotent either way, but a
+// disabled button during the round trip means there is never a moment to
+// double-click into).
+let orderOpBusy = false;
 
 // hotkeys are the real interface during the demo; say so on the button
 const hk = (k) => ` <span class="hk">${k}</span>`;
@@ -50,6 +69,7 @@ function paintLabels() {
   $("h-kpi").textContent = L.warehouse;
   $("h-byref").textContent = L.byRef;
   $("h-prop").textContent = L.proposal;
+  $("h-pending").textContent = L.pendingOrders;
   $("h-inv").textContent = L.inventory;
   $("h-log").textContent = L.events;
 
@@ -92,12 +112,6 @@ const simLabel = (t) => {
   const h = Math.floor(r / 3600), m = Math.floor((r % 3600) / 60);
   return `J+${d} ${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 };
-
-// the same cure model as algo/engine.py, mirrored here purely so the slider
-// gives instant feedback. The backend remains the authority.
-const cureH = (t, rh) =>
-  Math.max(24, 24 * (1 + Math.max(0, rh - 45) * 0.012)
-                  * (1 + Math.max(0, 22 - t) * 0.020));
 
 // algo/engine.py authors its rejection vocabulary in French, and
 // algo/test_engine.py asserts on those exact strings — so the translation
@@ -186,10 +200,12 @@ function render(st) {
     lastOrderId = o.order_id;
   } else if (!o) lastOrderId = null;
 
-  // no order to act on -> no live Confirm / Cancel to mis-click
+  // no order to act on -> no live Confirm / Cancel to mis-click. While a
+  // confirm/cancel round trip is in flight (orderOpBusy), stay disabled
+  // regardless of what this snapshot says -- it can be mid-flight-stale.
   const actionable = !!o && o.status === "PENDING";
-  $("btn-confirm").disabled = !actionable;
-  $("btn-cancel").disabled = !actionable;
+  $("btn-confirm").disabled = !actionable || orderOpBusy;
+  $("btn-cancel").disabled = !actionable || orderOpBusy;
 
   // --- inventory: the six columns the CDC asks for, always on screen ---
   const filt = $("filt").value || "*";
@@ -219,37 +235,68 @@ function render(st) {
     el._t = setTimeout(() => { el.className = ""; }, 6000);
   }
 
-  // the server owns the climate; the sliders only mirror it (unless dragging)
+  // the server owns the climate; the sliders only mirror it (unless dragging).
+  // Climate is monitoring-only (contract 1.2): it no longer feeds cure math,
+  // so it never changes v-cure -- that is a fixed 24 h label, painted once.
   if (document.activeElement !== $("t_c") && document.activeElement !== $("rh")) {
     $("t_c").value = st.env.t_c;
     $("rh").value = st.env.rh;
     $("v-t").textContent = (+st.env.t_c).toFixed(1);
     $("v-rh").textContent = st.env.rh;
   }
-  $("v-cure").textContent = cureH(st.env.t_c, st.env.rh).toFixed(1) + " h";
+
+  renderPendingOrders(st);
   updateTwin(st);
   firstRender = false;
 }
 
 // ---------------------------------------------------------------------------
+// pending reservations -- every PENDING order, not just the last one, with
+// a live lock countdown so a presenter can see a reservation about to
+// expire before it happens (contract 1.2 §6.5 / demo beat 6).
+// ---------------------------------------------------------------------------
+function renderPendingOrders(st) {
+  const el = $("pending-orders");
+  if (!el) return;
+  const rows = st.orders_pending || [];
+  el.innerHTML = !rows.length ? "" : rows.map((o) => {
+    const remaining = o.lock_remaining_s;
+    const label = remaining == null ? "" :
+      remaining > 0 ? L.lockExpiresIn(Math.max(0, Math.round(remaining))) : L.lockExpired;
+    return `<div class="pick">
+        <span>${o.order_id} · ${o.ref} · ${o.qty_allocated}/${o.qty_requested}</span>
+        <span>${label}</span></div>`;
+  }).join("");
+}
+
+// ---------------------------------------------------------------------------
 // activity log — one readable line per event instead of a wall of JSON.
-// The eight kinds below are every event(...) call in backend/main.py; an
-// unknown kind still renders (as its payload), so a new one cannot blank this.
+// Every kind logged by backend/warehouse.py or backend/main.py::event() has
+// a case below; an unknown kind still renders (as its payload), so a new
+// one cannot blank this.
 // ---------------------------------------------------------------------------
 function eventBits(kind, p) {
   switch (kind) {
     case "box_in": return [p.box_id, p.ref, `${p.qty} ${L.cores}`, p.slot,
                            p.confidence, p.delta ? `Δ${p.delta}` : null];
-    case "quarantine": return [p.box_id, p.ref, tDet(p.reason)];
+    case "quarantine": return [p.box_id, p.ref || p.declared_ref, tDet(p.reason)];
     case "cured": return [p.box_id, `${p.after_h} h`];
     case "demand": return [p.order_id, p.ref, `${p.allocated}/${p.qty}`,
                            (p.picks || []).join(" + ") || null,
                            p.rejected ? `${p.rejected} ${L.refusedShort}` : null];
-    case "pick_done": return [p.order_id, `${p.qty} ${L.cores}`];
-    case "order_cancel": return [p.order_id];
+    case "pick_done": return [p.order_id, `${p.qty} ${L.cores}`,
+                              (p.boxes || []).map((b) => b.box_id).join(" + ") || null];
+    case "order_cancel": return [p.order_id, (p.released || []).join(" + ") || null];
+    case "order_expired": return [p.order_id, (p.released || []).join(" + ") || null];
     case "clock_jump": return [`+${p.hours} h`];
+    case "clock_speed": return [`×${p.speed}`];
     case "env": return [`${(+p.t_c).toFixed(1)} °C`, `${p.rh} %`];
     case "article_new": return [p.ref, p.label, `${p.unit_mass_g} g`];
+    case "box_done_ignored": return [p.ref, tDet(p.reason)];
+    case "box_done_invalid": return [p.error];
+    case "arrival_fallback": return [p.box_id, p.ref, tDet(p.reason)];
+    case "system_reset": return [p.keep_articles ? "seed=false" : null];
+    case "scenario_loaded": return [p.name];
     default: return [JSON.stringify(p)];
   }
 }
@@ -301,7 +348,12 @@ async function boot() {
   document.querySelectorAll("[data-speed]").forEach((b) =>
     b.onclick = () => api("/clock", { speed: +b.dataset.speed }));
   $("jump6").onclick = () => api("/clock", { jump_h: 6 });
-  $("btn-scenario").onclick = () => api("/scenario", { name: "demo" }).then(renderLog);
+  // Scenario reseeds articles too (backend/warehouse.py::load_demo_scenario
+  // always does a full seed) -- refresh the dropdowns so a reference added
+  // via "+ New reference" before pressing S does not linger as a stale
+  // <option> pointing at a row that no longer exists.
+  $("btn-scenario").onclick = () =>
+    api("/scenario", { name: "demo" }).then(() => { refreshArticles(); renderLog(); });
 
   // ⋯ overflow menu — Reset and DB Explorer live in here so the top bar can
   // stay down to one line of things you actually press during the demo
@@ -316,7 +368,10 @@ async function boot() {
     $("btn-more").setAttribute("aria-expanded", String(open));
   };
   addEventListener("click", closeMenu);
-  $("btn-reset").onclick = () => { closeMenu(); api("/reset", {}).then(renderLog); };
+  $("btn-reset").onclick = () => {
+    closeMenu();
+    api("/reset", {}).then(() => { refreshArticles(); renderLog(); });
+  };
 
   // "+ New reference" modal — POST /api/articles (docs/contracts.md §2)
   const openRefModal = () => {
@@ -371,21 +426,48 @@ async function boot() {
   $("btn-quick").onclick = () =>
     api("/sim/box", { ref: $("art").value, qty: +$("qty").value }).then(renderLog);
 
-  const pushEnv = () => {
+  // Live label feedback on every drag tick; the actual POST (and the event
+  // it logs) only fires on release, not per pixel of drag (plan §18 -- the
+  // old version flooded the event log with one "env" row per input tick).
+  const previewEnv = () => {
     $("v-t").textContent = (+$("t_c").value).toFixed(1);
     $("v-rh").textContent = $("rh").value;
-    $("v-cure").textContent = cureH(+$("t_c").value, +$("rh").value).toFixed(1) + " h";
+  };
+  const pushEnv = () => {
+    previewEnv();
     api("/sim/env", { t_c: +$("t_c").value, rh: +$("rh").value });
   };
-  $("t_c").oninput = pushEnv;
-  $("rh").oninput = pushEnv;
+  $("t_c").oninput = previewEnv;
+  $("rh").oninput = previewEnv;
+  $("t_c").onchange = pushEnv;
+  $("rh").onchange = pushEnv;
 
-  $("btn-demand").onclick = () =>
-    api("/demand", { ref: $("dref").value, qty: +$("dqty").value }).then(renderLog);
-  $("btn-confirm").onclick = () => ST?.last_order &&
-    api("/demand/confirm", { order_id: ST.last_order.order_id }).then(renderLog);
-  $("btn-cancel").onclick = () => ST?.last_order &&
-    api("/demand/cancel", { order_id: ST.last_order.order_id }).then(renderLog);
+  // In-flight guards: the backend is idempotent either way (double-confirm
+  // is a documented no-op, not a double deduction), but disabling the
+  // button for the round trip means a held key or a double click never
+  // needs that safety net, and there is never a moment where the button
+  // looks live while the order has already changed under it.
+  const guardedOrderOp = (btn, fn) => {
+    btn.onclick = async () => {
+      if (btn.disabled || orderOpBusy) return;
+      orderOpBusy = true;
+      btn.disabled = true;
+      try { await fn(); } finally { orderOpBusy = false; if (ST) render(ST); }
+    };
+  };
+  $("btn-demand").onclick = async () => {
+    const b = $("btn-demand");
+    if (b.disabled) return;
+    b.disabled = true;
+    try {
+      await api("/demand", { ref: $("dref").value, qty: +$("dqty").value });
+      renderLog();
+    } finally { b.disabled = false; }
+  };
+  guardedOrderOp($("btn-confirm"), () => ST?.last_order &&
+    api("/demand/confirm", { order_id: ST.last_order.order_id }).then(renderLog));
+  guardedOrderOp($("btn-cancel"), () => ST?.last_order &&
+    api("/demand/cancel", { order_id: ST.last_order.order_id }).then(renderLog));
 
   document.querySelectorAll("[data-cam]").forEach((b) =>
     b.onclick = () => setCamera(b.dataset.cam));
