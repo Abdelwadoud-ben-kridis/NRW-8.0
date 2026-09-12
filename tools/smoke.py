@@ -95,16 +95,81 @@ check("anomaly box quarantined",
       any(b["state"] == "QUARANTINE" for b in st["boxes"]),
       [b["state"] for b in st["boxes"]])
 
-# 7. innovation: a cold wet room extends the cure beyond 24 h
+# 7. contract 1.2: cure is FIXED at 24 h regardless of climate (no adaptive
+# model -- the CDC never asked for one; T/RH are evidence-only now)
 call("/api/reset", {})
-call("/api/sim/env", {"t_c": 15.0, "rh": 85.0})
+call("/api/sim/env", {"t_c": 15.0, "rh": 85.0})   # a cold, humid room
 call("/api/sim/box", {"ref": "NY-220", "qty": 20})
 st = call("/api/state")
-check("adaptive cure extended", st["boxes"][0]["required_cure_h"] > 24.0,
+check("cure is exactly 24h even in a cold/humid room",
+      abs(st["boxes"][0]["required_cure_h"] - 24.0) < 0.01,
       st["boxes"][0]["required_cure_h"])
 
 # 8. events exist (this is what L2 replay reads)
 check("event log populated", len(call("/api/events?limit=50")) > 0)
+
+# 9. double confirm deducts exactly once (finding F1)
+call("/api/reset", {})
+call("/api/sim/env", {"t_c": 24.0, "rh": 45.0})
+call("/api/sim/box", {"ref": "NY-114", "qty": 40})
+call("/api/clock", {"jump_h": 25})
+time.sleep(0.4)
+plan = call("/api/demand", {"ref": "NY-114", "qty": 10})
+r1 = call("/api/demand/confirm", {"order_id": plan["order_id"]})
+r2 = call("/api/demand/confirm", {"order_id": plan["order_id"]})
+check("first confirm applies", r1.get("already") is False, r1)
+check("second confirm is a no-op, not an error", r2.get("already") is True, r2)
+st = call("/api/state")
+box1 = [b for b in st["boxes"] if b["box_id"] == "BOX-1"][0]
+check("qty deducted exactly once", box1["qty_available"] == 30, box1["qty_available"])
+
+# confirming a cancelled order is refused, not silently applied
+call("/api/reset", {})
+call("/api/sim/env", {"t_c": 24.0, "rh": 45.0})
+call("/api/sim/box", {"ref": "NY-114", "qty": 40})
+call("/api/clock", {"jump_h": 25})
+time.sleep(0.4)
+plan = call("/api/demand", {"ref": "NY-114", "qty": 10})
+call("/api/demand/cancel", {"order_id": plan["order_id"]})
+try:
+    call("/api/demand/confirm", {"order_id": plan["order_id"]})
+    check("confirming a cancelled order is refused (HTTP error expected)", False)
+except Exception:
+    check("confirming a cancelled order is refused (HTTP error expected)", True)
+
+# 10. reservation expiry cancels the ORDER too, not just the box lock
+# (finding F4) -- LOCK_TTL_H (backend/config.py) is 2.0 sim-h
+call("/api/reset", {})
+call("/api/sim/env", {"t_c": 24.0, "rh": 45.0})
+call("/api/sim/box", {"ref": "NY-114", "qty": 40})
+call("/api/clock", {"jump_h": 25})
+time.sleep(0.4)
+plan = call("/api/demand", {"ref": "NY-114", "qty": 10})
+call("/api/clock", {"jump_h": 3})       # past the 2h lock TTL
+time.sleep(0.6)                          # let loop_clock's sweep run
+st = call("/api/state")
+box1 = [b for b in st["boxes"] if b["box_id"] == "BOX-1"][0]
+check("expired reservation releases the box back to READY",
+      box1["state"] == "READY", box1["state"])
+check("expired order no longer appears as pending",
+      not any(o["order_id"] == plan["order_id"] for o in st.get("orders_pending", [])))
+ev = call("/api/events?limit=10")
+check("an order_expired event was logged",
+      any(e["kind"] == "order_expired" for e in ev), [e["kind"] for e in ev])
+
+# 11. unknown reference is quarantined WITHOUT polluting a real article
+# (finding F7 -- it used to be misfiled under NY-114)
+call("/api/reset", {})
+call("/api/sim/box", {"ref": "NOPE-999", "qty": 10})
+st = call("/api/state")
+bad = [b for b in st["boxes"] if b["state"] == "QUARANTINE"]
+check("unknown ref quarantined", len(bad) == 1, bad)
+check("does not pollute NY-114's article", bad[0]["ref"] is None, bad[0]["ref"])
+
+# 12. the read-only consistency checker (backend/consistency.py) is green
+chk = call("/api/db/check")
+check("consistency checker: overall PASS", chk["overall"] == "PASS",
+      [c for c in chk["checks"] if c["severity"] != "PASS"])
 
 print("\n" + ("ALL GREEN" if not fails else "%d FAILURE(S): %s" % (len(fails), fails)))
 sys.exit(1 if fails else 0)
