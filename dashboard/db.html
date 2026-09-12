@@ -16,6 +16,7 @@
       <div class="sub">scw.db · read-only — every query here is a SELECT</div>
     </div>
     <div class="spacer"></div>
+    <span class="pill" id="consistency-badge" title="backend/consistency.py — PASS/WARN/FAIL over 22 checks">…</span>
     <label class="livewrap"><input type="checkbox" id="live" checked> live</label>
     <button class="ghost" id="btn-refresh">Refresh</button>
     <a class="ghost linkbtn" href="/">← Live dashboard</a>
@@ -24,6 +25,20 @@
   <div id="dbbody">
 
     <section class="kpis" id="kpis"></section>
+
+    <section class="card" id="consistency-card" hidden>
+      <h2>Consistency check — <span id="consistency-sub" class="muted"></span></h2>
+      <div id="consistency-list"></div>
+    </section>
+
+    <section class="card" id="boxtrace-card" hidden>
+      <div class="tblhead">
+        <h2 style="margin:0">Box trace — <span id="boxtrace-title" class="muted"></span></h2>
+        <span class="spacer"></span>
+        <button class="ghost" id="boxtrace-close">Close</button>
+      </div>
+      <div id="boxtrace-body"></div>
+    </section>
 
     <div class="cols2">
       <section class="card">
