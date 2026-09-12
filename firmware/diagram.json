@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "author": "NRW 8.0 - Smart Core Warehouse",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-devkit-v1", "id": "esp", "top": 0, "left": 0, "attrs": {} },
+    { "type": "wokwi-potentiometer", "id": "pot", "top": -110, "left": 210,
+      "attrs": { "value": "0" } },
+    { "type": "wokwi-pushbutton", "id": "btnBeam", "top": 40, "left": 230,
+      "attrs": { "color": "green", "label": "BEAM" } },
+    { "type": "wokwi-pushbutton", "id": "btnDone", "top": 110, "left": 230,
+      "attrs": { "color": "red", "label": "BOX DONE" } },
+    { "type": "wokwi-dht22", "id": "dht", "top": -110, "left": -160, "attrs": {} },
+    { "type": "wokwi-led", "id": "led", "top": 180, "left": 120,
+      "attrs": { "color": "yellow", "label": "CORE" } },
+    { "type": "wokwi-resistor", "id": "r1", "top": 210, "left": 60,
+      "attrs": { "value": "220" } }
+  ],
+  "connections": [
+    [ "esp:GND.1", "pot:GND", "black", [ "v0" ] ],
+    [ "esp:3V3", "pot:VCC", "red", [ "v0" ] ],
+    [ "pot:SIG", "esp:D34", "green", [ "v0" ] ],
+
+    [ "btnBeam:1.l", "esp:GND.2", "black", [ "v0" ] ],
+    [ "btnBeam:2.l", "esp:D25", "green", [ "v0" ] ],
+
+    [ "btnDone:1.l", "esp:GND.2", "black", [ "v0" ] ],
+    [ "btnDone:2.l", "esp:D26", "orange", [ "v0" ] ],
+
+    [ "dht:VCC", "esp:3V3", "red", [ "v0" ] ],
+    [ "dht:GND", "esp:GND.1", "black", [ "v0" ] ],
+    [ "dht:SDA", "esp:D15", "blue", [ "v0" ] ],
+
+    [ "esp:D2", "r1:1", "yellow", [ "v0" ] ],
+    [ "r1:2", "led:A", "yellow", [ "v0" ] ],
+    [ "led:C", "esp:GND.2", "black", [ "v0" ] ]
+  ],
+  "dependencies": {}
+}

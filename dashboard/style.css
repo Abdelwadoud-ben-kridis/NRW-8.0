@@ -1,0 +1,231 @@
+/* style.css — shared by index.html (live dashboard) and db.html (DB Explorer).
+   db.css loads AFTER this file and wins where the two overlap, so anything
+   scoped here to .grid / #inv / #log / .seg is dashboard-only by construction. */
+
+:root{
+  --bg:#0d1117; --panel:#151b23; --panel2:#1b2430;
+  --line:#26303d; --line-soft:#1f2833; --hover:#202b3a; --sel:#18304d;
+  --txt:#e6edf3; --dim:#8b98a5; --head:#a9b6c4; --accent:#4f8cff;
+  --ok:#22c98a; --warn:#f5a623; --bad:#ff5d5d; --res:#7aa2ff; --idle:#5b6673;
+  --r:8px;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--txt);
+  font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden}
+
+/* ---------- layout ----------
+   Three rows. The bottom one is the point of the whole redesign: the
+   inventory table (the literal answer to the CDC brief) spans the left and
+   centre columns and is never behind a scrollbar, at any resolution. */
+#app{display:grid;height:100vh;
+  grid-template-columns:264px 1fr 380px;
+  grid-template-rows:54px minmax(0,1fr) clamp(215px,30vh,310px);
+  grid-template-areas:"top  top  top"
+                      "left mid  right"
+                      "inv  inv  log";
+  gap:1px;background:var(--line)}
+#top{grid-area:top;background:var(--panel);display:flex;align-items:center;
+  gap:12px;padding:0 14px;min-width:0}
+#left{grid-area:left;background:var(--panel);overflow-y:auto;padding:12px;min-height:0}
+#mid{grid-area:mid;background:#090d12;position:relative;overflow:hidden}
+#right{grid-area:right;background:var(--panel);overflow-y:auto;padding:12px;min-height:0}
+#inv{grid-area:inv;background:var(--panel);padding:8px 12px;
+  display:flex;flex-direction:column;min-height:0}
+#log{grid-area:log;background:var(--panel);padding:8px 12px;
+  display:flex;flex-direction:column;min-height:0}
+canvas{display:block;width:100%;height:100%}
+
+/* ---------- top bar ---------- */
+#top .brand{min-width:0;flex:0 1 auto}
+#top h1{font-size:15px;margin:0;font-weight:650;letter-spacing:.2px;white-space:nowrap}
+#top .sub{color:var(--dim);font-size:11px;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.clock{font-family:var(--mono);font-size:22px;font-weight:600;color:var(--accent);
+  flex:0 0 auto;white-space:nowrap}
+.spacer{flex:1}
+.nowrap{white-space:nowrap}
+.pill{padding:3px 9px;border-radius:99px;font-size:11px;font-weight:600;
+  border:1px solid var(--line);background:var(--panel2);white-space:nowrap;flex:0 0 auto}
+.pill.on{color:var(--ok);border-color:#1d5c44}
+.pill.off{color:var(--bad);border-color:#5c2020}
+.pill.mode{color:var(--warn);border-color:#5c4820}
+.pill.mode.fallback{color:var(--bad);border-color:#5c2020}
+
+/* clock speed: one segmented control, with the ACTIVE speed visible —
+   you must be able to tell at a glance how fast the sim clock is running */
+.seg{display:flex;flex:0 0 auto;border:1px solid var(--line);
+  border-radius:var(--r);overflow:hidden}
+.seg button{border:0;border-radius:0;background:var(--panel2);color:var(--dim);
+  padding:6px 10px;font-size:11px;white-space:nowrap}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button:hover{background:var(--hover);color:var(--txt)}
+.seg button.on{background:var(--accent);color:#fff;font-weight:700}
+
+/* secondary actions live behind ⋯ so the top bar stays readable */
+.menu{position:relative;flex:0 0 auto}
+.menu-pop{position:absolute;right:0;top:calc(100% + 6px);z-index:20;
+  background:var(--panel2);border:1px solid var(--line);border-radius:var(--r);
+  padding:6px;display:flex;flex-direction:column;gap:4px;min-width:156px;
+  box-shadow:0 10px 28px #000a}
+.menu-pop>*{text-align:left;white-space:nowrap;text-decoration:none;color:var(--txt)}
+
+/* ---------- widgets ---------- */
+h2{font-size:11px;text-transform:uppercase;letter-spacing:.9px;color:var(--head);
+  margin:14px 0 8px;font-weight:700}
+h2:first-child{margin-top:2px}
+#left h2{margin:10px 0 7px}
+#left h2:first-child{margin-top:0}
+label{display:block;font-size:11px;color:var(--dim);margin:7px 0 3px}
+select,input[type=number],input[type=text]{width:100%;background:var(--panel2);
+  color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:6px 8px;
+  font-size:12px;font-family:inherit}
+input[type=range]{width:100%;accent-color:var(--accent);margin:2px 0 0;display:block}
+button{background:var(--panel2);color:var(--txt);border:1px solid var(--line);
+  border-radius:6px;padding:8px 10px;font-size:12px;cursor:pointer;
+  font-family:inherit;transition:.12s}
+button:hover{border-color:var(--accent);background:var(--hover)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;
+  font-weight:600;width:100%;margin-top:8px;padding:8px}
+button.primary:hover{background:#3d7af0}
+button.ghost{padding:5px 8px;font-size:11px}
+button:disabled{opacity:.38;cursor:not-allowed}
+button:disabled:hover{border-color:var(--line);background:var(--panel2)}
+/* the L1 fallback: still one click away, but no longer shouting as loud as
+   the primary action it stands in for */
+button.textlink{background:none;border:0;width:100%;padding:5px 0;
+  color:var(--dim);font-size:11px;text-decoration:underline dotted}
+button.textlink:hover{background:none;color:var(--accent)}
+.row{display:flex;gap:6px;flex-wrap:wrap}
+.row>*{flex:1;min-width:0}
+.row>.f2{flex:2}
+.row label{margin-top:0}
+.row.tight{margin-top:6px}
+.hk{opacity:.6;font-weight:400}
+.muted{color:var(--dim);font-size:11px}
+.secthead{display:flex;align-items:center;gap:10px;margin-bottom:6px;flex:0 0 auto}
+.secthead h2{margin:0}
+.secthead select{width:auto;min-width:150px;padding:4px 7px;font-size:11px}
+.cureline{display:flex;justify-content:space-between;margin-top:7px;
+  background:var(--panel2);border:1px solid var(--line);border-radius:var(--r);
+  padding:6px 8px;font-size:11.5px;color:var(--dim)}
+.cureline b{color:var(--warn);font-family:var(--mono)}
+
+/* ---------- KPI: four tiles, not six. Every label carries its unit, so a
+   box count is never mistaken for a core count. ---------- */
+.kpis{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.kpi{background:var(--panel2);border:1px solid var(--line);border-radius:var(--r);
+  padding:9px 10px}
+.kpi .v{font-size:26px;font-weight:700;font-family:var(--mono);line-height:1.05}
+.kpi .v small{font-size:15px;color:var(--dim);font-weight:600}
+.kpi .k{font-size:9.5px;color:var(--dim);text-transform:uppercase;
+  letter-spacing:.5px;margin-top:2px}
+.kpi.ok .v{color:var(--ok)} .kpi.warn .v{color:var(--warn)}
+.kpi.bad .v{color:var(--bad)} .kpi.acc .v{color:var(--accent)}
+
+/* ---------- tables ---------- */
+table{width:100%;border-collapse:collapse;font-size:10.5px}
+th{text-align:left;color:var(--dim);font-weight:600;padding:5px 4px;
+  border-bottom:1px solid var(--line);font-size:10px;text-transform:uppercase}
+td{padding:4px 3px;border-bottom:1px solid var(--line-soft);font-family:var(--mono)}
+
+/* .grid = the two dashboard tables, sized to be legible from a projector */
+table.grid{table-layout:fixed}
+table.grid th{font-size:9.5px;letter-spacing:.5px;font-weight:700;
+  padding:5px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+table.grid td{font-size:12.5px;padding:6px;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+table.grid td.num,table.grid th.num{text-align:right}
+table.grid tr.sel{background:var(--sel)}
+.tblwrap{overflow:auto;min-height:0;flex:1}
+/* header stays put while the rows scroll under it */
+.tblwrap table.grid th{position:sticky;top:0;z-index:1;background:var(--panel)}
+
+.tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:10.5px;
+  font-weight:700;font-family:inherit}
+.s-DRYING{background:#4a3410;color:var(--warn)}
+.s-READY{background:#0f3d2c;color:var(--ok)}
+.s-RESERVED{background:#1b2c52;color:var(--res)}
+.s-QUARANTINE{background:#4a1616;color:var(--bad)}
+.s-EMPTY,.s-ARCHIVED{background:#232b35;color:var(--dim)}
+.s-PICKING,.s-STORING,.s-INCOMING{background:#2b2440;color:#b39bff}
+
+/* ---------- cure bar ---------- */
+.bar{height:5px;background:#232b35;border-radius:3px;overflow:hidden;min-width:44px}
+.bar>i{display:block;height:100%;background:var(--warn)}
+.bar.done>i{background:var(--ok)}
+.bar.acc>i{background:var(--accent)}
+.cure{display:flex;align-items:center;gap:6px}
+.cure .bar{flex:1}
+.cure .h{font-size:10.5px;color:var(--dim);flex:0 0 auto}
+
+/* ---------- stock by reference (CDC task 5: classer par type) ---------- */
+#byref td .sw{display:inline-block;width:8px;height:8px;border-radius:2px;
+  margin-right:6px;vertical-align:middle}
+#byref .r-ready{color:var(--ok);font-weight:700}
+#byref .r-dry{color:var(--warn);font-weight:700}
+#byref .r-none{color:var(--dim)}
+
+/* ---------- FIFO proposal: the rejections are not optional (contracts §4) --- */
+.order{background:var(--panel2);border:1px solid var(--line);border-radius:var(--r);
+  padding:10px}
+.order .hd{display:flex;justify-content:space-between;font-weight:700;font-size:12.5px}
+.pick{display:flex;justify-content:space-between;padding:4px 6px;border-radius:5px;
+  background:#0f3d2c33;border-left:3px solid var(--ok);margin-top:4px;
+  font-family:var(--mono);font-size:11.5px}
+.rej{display:flex;justify-content:space-between;gap:8px;padding:4px 6px;
+  border-radius:5px;background:#ff5d5d14;border-left:3px solid #6a3030;
+  margin-top:3px;font-size:11px;color:#c9b4b4}
+.rej b{color:#ff9a9a;font-weight:600}
+
+/* ---------- banner ---------- */
+#banner{position:absolute;left:12px;top:12px;right:12px;padding:9px 12px;
+  border-radius:var(--r);font-size:12.5px;font-weight:600;display:none;z-index:6;
+  backdrop-filter:blur(6px)}
+#banner.ok{background:#0f3d2ccc;border:1px solid #1d5c44;color:#9ff0cd;display:block}
+#banner.quarantine{background:#4a1616cc;border:1px solid #7a2b2b;color:#ffc2c2;display:block}
+
+/* ---------- 3D overlays ---------- */
+#hud{position:absolute;right:12px;bottom:12px;background:#0d1117cc;
+  border:1px solid var(--line);border-radius:var(--r);padding:8px 10px;
+  font-family:var(--mono);font-size:10.5px;color:var(--dim);z-index:5;
+  backdrop-filter:blur(6px);line-height:1.6;max-width:46%}
+#hud b{color:var(--txt)}
+#cams{position:absolute;left:12px;bottom:12px;display:flex;gap:6px;z-index:5;
+  flex-wrap:wrap;max-width:52%}
+/* the colours in the scene mean nothing to a juror without this */
+#legend{position:absolute;left:12px;right:12px;bottom:46px;z-index:5;
+  display:flex;flex-wrap:wrap;gap:6px 11px;
+  align-items:center;background:#0d1117cc;border:1px solid var(--line);
+  border-radius:var(--r);padding:6px 9px;backdrop-filter:blur(6px);
+  font-size:10.5px;color:var(--dim)}
+#legend i{display:inline-block;width:9px;height:9px;border-radius:2px;
+  margin-right:5px;vertical-align:middle}
+
+/* ---------- activity log: readable lines, not raw JSON ---------- */
+#logbody{flex:1;min-height:0;overflow-y:auto;font-family:var(--mono);font-size:11px}
+.ev{display:flex;gap:8px;padding:1px 0}
+.ev .t{color:var(--accent);flex:0 0 70px}
+.ev .k{color:var(--warn);flex:0 0 76px}
+.ev .p{color:var(--dim);flex:1;min-width:0;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+
+/* ---------- "+ New reference" modal ---------- */
+.modal-wrap{position:fixed;inset:0;z-index:30;background:#04070ac2;
+  display:flex;align-items:center;justify-content:center}
+.modal{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;width:360px;max-width:90vw;box-shadow:0 20px 50px #000a}
+.modal h2{margin:0 0 10px}
+.modal .row{margin-top:0}
+input[type=color]{width:100%;background:var(--panel2);border:1px solid var(--line);
+  border-radius:6px;padding:2px;height:34px;cursor:pointer}
+#nref-err{color:var(--bad);margin-top:8px}
+
+/* ---------- tighter screens (1366x768 projectors) ---------- */
+@media (max-width:1500px){ #top .sub{display:none} }
+@media (max-width:1280px){
+  #app{grid-template-columns:244px 1fr 348px}
+  .clock{font-size:20px}
+}

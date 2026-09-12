@@ -1,0 +1,108 @@
+/* db.css — Database Explorer. Reuses the tokens from style.css (:root vars);
+   this file only adds the components this page needs. */
+
+html,body{overflow:auto;height:auto}
+body{padding-bottom:24px}
+
+#dbapp{max-width:1360px;margin:0 auto;padding:0 16px}
+
+#dbtop{display:flex;align-items:center;gap:14px;padding:16px 0;
+  border-bottom:1px solid var(--line);margin-bottom:18px;flex-wrap:wrap}
+#dbtop h1{font-size:17px;margin:0;font-weight:650}
+#dbtop .sub{color:var(--dim);font-size:11.5px;font-family:var(--mono)}
+.livewrap{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim)}
+.linkbtn{text-decoration:none;display:inline-block}
+
+#dbbody{display:flex;flex-direction:column;gap:18px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.card h2{margin:0 0 10px;font-size:11px;text-transform:uppercase;letter-spacing:.8px;
+  color:var(--dim);font-weight:700}
+.cols2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media (max-width:900px){.cols2{grid-template-columns:1fr}}
+
+/* ---------- KPI strip ---------- */
+.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+@media (max-width:900px){.kpis{grid-template-columns:repeat(2,1fr)}}
+.kpis .tile{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:12px 14px}
+.kpis .tile .v{font-size:24px;font-weight:700;font-family:var(--mono);line-height:1.1;
+  color:var(--txt)}
+.kpis .tile .k{font-size:10.5px;color:var(--dim);text-transform:uppercase;
+  letter-spacing:.5px;margin-top:2px}
+
+/* ---------- ERD ---------- */
+#erd svg{width:100%;height:auto;display:block}
+.erd-table rect{fill:var(--panel2);stroke:var(--line)}
+.erd-table .title{fill:var(--txt);font-weight:700}
+.erd-table .col{fill:var(--dim)}
+.erd-table .pk{fill:var(--accent);font-weight:700}
+.erd-edge{stroke:#5b6a7d;stroke-width:1.6;fill:none}
+.erd-edge.soft{stroke-dasharray:3 3;opacity:.6}
+.erd-edge.json{stroke-dasharray:1 4;opacity:.5}
+.erd-arrow{fill:#5b6a7d}
+
+#rels{display:flex;flex-direction:column;gap:8px;font-size:11.5px}
+#rels .rel{display:flex;gap:8px;align-items:baseline;padding:6px 8px;
+  background:var(--panel2);border-radius:7px;border:1px solid var(--line)}
+#rels .rel b{font-family:var(--mono);color:var(--txt);white-space:nowrap}
+#rels .rel .arrow{color:var(--dim)}
+#rels .rel .note{color:var(--dim);font-size:10.5px}
+#rels .tag{font-size:9px;text-transform:uppercase;padding:1px 5px;border-radius:4px;
+  font-weight:700;letter-spacing:.4px}
+#rels .tag.fk{background:#1b2c52;color:var(--res)}
+#rels .tag.soft{background:#2b2440;color:#b39bff}
+#rels .tag.json{background:#232b35;color:var(--dim)}
+
+/* ---------- bar charts ---------- */
+.chart{display:flex;flex-direction:column;gap:9px}
+.chart .row{display:flex;align-items:center;gap:10px}
+.chart .row .name{width:96px;flex:0 0 auto;font-size:11.5px;color:var(--txt);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chart .row .track{flex:1;height:22px;background:var(--panel2);border-radius:4px;
+  position:relative;overflow:hidden}
+.chart .row .fill{position:absolute;left:0;top:0;bottom:0;border-radius:3px;
+  transition:width .3s ease}
+.chart .row .fill:hover{filter:brightness(1.15)}
+.chart .row .val{width:40px;flex:0 0 auto;text-align:right;font-family:var(--mono);
+  font-size:11.5px;color:var(--txt);font-weight:600}
+.chart .empty{color:var(--dim);font-size:11.5px;padding:8px 0}
+.chart-legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:2px;font-size:10.5px;
+  color:var(--dim)}
+.chart-legend .sw{display:inline-block;width:9px;height:9px;border-radius:2px;
+  margin-right:4px;vertical-align:-1px}
+
+/* ---------- rack occupancy grid ---------- */
+.legend{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:10px;font-size:10.5px;
+  color:var(--dim)}
+.legend .sw{display:inline-block;width:9px;height:9px;border-radius:2px;
+  margin-right:4px;vertical-align:-1px}
+#rackgrid{display:flex;gap:22px;flex-wrap:wrap}
+.face{display:flex;flex-direction:column-reverse;gap:2px}
+.face .facelabel{color:var(--dim);font-size:10px;text-transform:uppercase;
+  letter-spacing:.5px;margin-bottom:4px;order:99}
+.levelrow{display:flex;gap:2px}
+.cell{width:15px;height:11px;border-radius:2px;background:var(--panel2);
+  border:1px solid var(--line);cursor:default}
+.cell:hover{outline:1.5px solid var(--accent);outline-offset:1px}
+
+/* ---------- tooltip ---------- */
+#tooltip{position:fixed;z-index:50;background:#0d1117f0;border:1px solid var(--line);
+  border-radius:7px;padding:7px 9px;font-size:11px;pointer-events:none;
+  box-shadow:0 6px 20px rgba(0,0,0,.4);max-width:240px}
+#tooltip .t-val{font-family:var(--mono);font-weight:700;color:var(--txt);font-size:12.5px}
+#tooltip .t-lbl{color:var(--dim);margin-top:2px}
+#tooltip .t-key{display:inline-block;width:8px;height:8px;border-radius:2px;
+  margin-right:5px;vertical-align:-1px}
+
+/* ---------- table browser ---------- */
+.tblhead{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.tblhead select, .tblhead input{width:auto}
+#q{min-width:180px}
+#tblwrap{overflow-x:auto}
+#datatable{width:100%;border-collapse:collapse;font-size:11px;white-space:nowrap}
+#datatable th{text-align:left;color:var(--dim);font-weight:600;padding:6px 8px;
+  border-bottom:1px solid var(--line);font-size:10px;text-transform:uppercase;
+  position:sticky;top:0;background:var(--panel)}
+#datatable td{padding:5px 8px;border-bottom:1px solid #1d2531;font-family:var(--mono)}
+#datatable tbody tr:hover{background:var(--panel2)}
+#datatable td.null{color:var(--dim);font-style:italic}

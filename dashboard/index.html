@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Smart Core Warehouse — NRW 8.0</title>
+<link rel="stylesheet" href="/static/style.css">
+<!-- Three.js is VENDORED in /static/vendor. No CDN, no npm, no bundler:
+     the venue wifi cannot break your 25-point criterion. -->
+<script type="importmap">
+{ "imports": {
+    "three": "/static/vendor/three.module.js",
+    "three/addons/": "/static/vendor/"
+} }
+</script>
+</head>
+<body>
+<div id="app">
+
+  <!-- ---------------- top: identity, clock, link status, actions ------------ -->
+  <div id="top">
+    <div class="brand">
+      <h1 id="t-title"></h1>
+      <div class="sub" id="t-sub"></div>
+    </div>
+    <div class="clock" id="clock">J+0 00:00</div>
+    <div class="seg" id="seg-speed">
+      <button data-speed="1">&times;1</button>
+      <button data-speed="60">&times;60</button>
+      <button data-speed="3600">&times;3600</button>
+    </div>
+    <button class="ghost nowrap" id="jump6"></button>
+    <div class="spacer"></div>
+    <span class="pill mode" id="p-mode">L0</span>
+    <span class="pill off" id="p-dev">ESP32</span>
+    <button class="ghost nowrap" id="btn-scenario"></button>
+    <div class="menu">
+      <button class="ghost" id="btn-more" aria-haspopup="true" aria-expanded="false">&#8943;</button>
+      <div class="menu-pop" id="more-pop" hidden>
+        <button class="ghost" id="btn-newref"></button>
+        <button class="ghost" id="btn-reset"></button>
+        <a class="ghost" id="lnk-db" href="/db"></a>
+      </div>
+    </div>
+  </div>
+
+  <!-- ---------------- "+ New reference" modal ---------------- -->
+  <!-- Adds a row to the articles table via POST /api/articles (docs/contracts.md
+       §2). Every dropdown and the FIFO/twin already read articles from the DB
+       at runtime, so nothing else needs to know a new ref was added. -->
+  <div id="refModal" class="modal-wrap" hidden>
+    <div class="modal">
+      <h2 id="h-newref"></h2>
+      <label id="l-refcode"></label>
+      <input type="text" id="nref-ref" placeholder="NY-450" maxlength="24">
+      <label id="l-reflabel"></label>
+      <input type="text" id="nref-label" placeholder="Noyau bride 450" maxlength="64">
+      <div class="row">
+        <div><label id="l-refmass"></label>
+          <input type="number" id="nref-mass" min="0.1" step="0.1" placeholder="310"></div>
+        <div><label id="l-refcap"></label>
+          <input type="number" id="nref-cap" min="1" step="1" placeholder="40"></div>
+        <div><label id="l-refcolor"></label>
+          <input type="color" id="nref-color" value="#4f8cff"></div>
+      </div>
+      <div class="muted" id="nref-err" hidden></div>
+      <div class="row tight">
+        <button class="primary" id="btn-nref-add"></button>
+        <button class="ghost" id="btn-nref-cancel"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ---------------- left: the operator's console ---------------- -->
+  <!-- Simulation inputs only. The jury never needs to read this column;
+       every action here also has a hotkey (see the label on each button). -->
+  <div id="left">
+    <h2 id="h-plant"></h2>
+    <div class="row">
+      <div class="f2"><label id="l-art"></label><select id="art"></select></div>
+      <div class="f1"><label id="l-qty"></label>
+        <input type="number" id="qty" value="37" min="1" max="80"></div>
+    </div>
+    <label id="l-ano"></label>
+    <select id="ano"></select>
+    <button class="primary" id="btn-arrive"></button>
+    <button class="textlink" id="btn-quick"></button>
+
+    <h2 id="h-env"></h2>
+    <div class="row">
+      <div><label><span id="l-temp"></span> <b id="v-t">24.0</b> °C</label>
+        <input type="range" id="t_c" min="8" max="40" step="0.5" value="24"></div>
+      <div><label><span id="l-hum"></span> <b id="v-rh">52</b> %</label>
+        <input type="range" id="rh" min="20" max="95" step="1" value="52"></div>
+    </div>
+    <div class="cureline"><span id="l-cure"></span> <b id="v-cure">24.0 h</b></div>
+
+    <h2 id="h-dem"></h2>
+    <div class="row">
+      <div class="f2"><label id="l-dref"></label><select id="dref"></select></div>
+      <div class="f1"><label id="l-dqty"></label>
+        <input type="number" id="dqty" value="40" min="1" max="500"></div>
+    </div>
+    <button class="primary" id="btn-demand"></button>
+  </div>
+
+  <!-- ---------------- centre: the 3D digital twin ---------------- -->
+  <div id="mid">
+    <canvas id="cv"></canvas>
+    <div id="banner"></div>
+    <div id="legend"></div>
+    <div id="cams">
+      <button class="ghost" data-cam="iso">Iso</button>
+      <button class="ghost" data-cam="aisle">Aisle</button>
+      <button class="ghost" data-cam="front">Front</button>
+      <button class="ghost" data-cam="top">Top</button>
+      <button class="ghost nowrap" id="btn-follow">Follow crane</button>
+    </div>
+    <div id="hud"></div>
+  </div>
+
+  <!-- ---------------- right: KPI + stock by type + FIFO proposal ---------- -->
+  <div id="right">
+    <h2 id="h-kpi"></h2>
+    <div class="kpis" id="kpis"></div>
+
+    <h2 id="h-byref"></h2>
+    <table id="byref" class="grid">
+      <colgroup>
+        <col style="width:74px"><col style="width:54px">
+        <col style="width:70px"><col>
+      </colgroup>
+      <thead></thead><tbody></tbody>
+    </table>
+
+    <h2 id="h-prop"></h2>
+    <div id="order"></div>
+    <!-- the two actions sit next to the order they act on, not in the far
+         column; they stay static DOM so the 5 Hz re-render cannot reset them -->
+    <div class="row tight">
+      <button class="ghost" id="btn-confirm"></button>
+      <button class="ghost" id="btn-cancel"></button>
+    </div>
+  </div>
+
+  <!-- ---------------- bottom left+centre: the answer to the brief ---------- -->
+  <!-- REF · QTY · BOX · AGE · CURE/STATE — the six columns the CDC asks for.
+       Full width, always on screen, never behind a scrollbar. -->
+  <div id="inv">
+    <div class="secthead">
+      <h2 id="h-inv"></h2>
+      <select id="filt"></select>
+    </div>
+    <div class="tblwrap">
+      <table id="invt" class="grid">
+        <colgroup>
+          <col style="width:84px"><col style="width:84px"><col style="width:108px">
+          <col style="width:96px"><col style="width:72px"><col>
+          <col style="width:86px"><col style="width:96px">
+        </colgroup>
+        <thead></thead><tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ---------------- bottom right: live activity ---------------- -->
+  <div id="log">
+    <div class="secthead"><h2 id="h-log"></h2></div>
+    <div id="logbody"></div>
+  </div>
+
+</div>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

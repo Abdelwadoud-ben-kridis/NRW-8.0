@@ -1,0 +1,156 @@
+// Every user-visible string lives here. Nobody hard-codes text in the HTML.
+// Jury switches language -> change ONE line:  export const L = FR;  (or EN)
+
+export const EN = {
+  lang: "EN",
+  title: "Smart Core Warehouse",
+  subtitle: "SOPAL & SOPALTEC — NRW 8.0 INSAT",
+  clock: "Simulated clock", speed: "Speed", jump6: "+6 h", reset: "Reset",
+  scenario: "Load demo scenario", more: "More", dbExplorer: "DB Explorer",
+  newRef: "New reference", refCode: "Code", refLabel: "Label",
+  unitMass: "Unit mass (g)", capacity: "Box capacity", color: "Colour",
+  addRef: "Add reference", cancelRef: "Cancel",
+  refAdded: (ref) => `Reference ${ref} added`,
+  plant: "Plant model — core arrival",
+  article: "Reference", qty: "Quantity", anomaly: "Inject anomaly",
+  arrive: "Box arrives on conveyor", quickBox: "Quick box, no ESP32",
+  env: "Curing room climate", temp: "Temperature", hum: "Humidity",
+  cureNow: "Required cure now",
+  demand: "Production demand", ask: "Request cores",
+  confirm: "Confirm pick", cancel: "Cancel",
+  proposal: "Automatic proposal (FIFO)",
+  picks: "Boxes selected", rejected: "Boxes rejected — and why",
+  noOrder: "No order yet. Ask production for cores.",
+  shortfall: "Shortfall", allocated: "Allocated", requested: "Requested",
+  warehouse: "Warehouse",
+  kpiSlots: "Slots used", kpiReady: "Ready", kpiDrying: "Drying",
+  kpiQuar: "Quarantine", kpiCores: "Cores ready", kpiFree: "Free slots",
+  inventory: "Inventory", box: "Box", ref: "Ref", state: "State",
+  slot: "Slot", cure: "Cure", left: "Left", conf: "Confidence",
+  counts: "Beam / Weight", stored: "Stored at", age: "Age",
+  byRef: "Stock by reference", fifoHead: "next out (FIFO)", none: "none ready",
+  nextOut: "Next out (FIFO)", colReady: "Ready", colDrying: "Curing",
+  filterAll: "All references", kpiReserved: "Reserved",
+  events: "Activity", device: "ESP32", broker: "Broker",
+  online: "online", offline: "offline", mode: "Mode",
+  legend: "Slot colour", cores: "cores", boxes: "boxes",
+  refusedShort: "refused",
+  st: {
+    INCOMING: "Incoming", IDENTIFYING: "Identifying", COUNTING: "Counting",
+    STORING: "Storing", DRYING: "Drying", READY: "Ready", RESERVED: "Reserved",
+    PICKING: "Picking", EMPTY: "Empty", ARCHIVED: "Archived",
+    QUARANTINE: "Quarantine",
+  },
+  // event-log kinds, from the `event(...)` calls in backend/main.py
+  ev: {
+    box_in: "stored", quarantine: "quarantine", cured: "cured",
+    demand: "demand", pick_done: "picked", order_cancel: "cancelled",
+    clock_jump: "clock", env: "climate", article_new: "new reference",
+  },
+  // The decision engine authors its rejection vocabulary in French (it is
+  // P2's territory and algo/test_engine.py asserts on the exact strings), so
+  // the UI translates it here on the way to the screen. Anything unmatched
+  // falls through unchanged.
+  rej: {
+    "en cours de reception": "inbound",
+    "sechage insuffisant": "insufficient cure",
+    "reserve": "reserved",
+    "prelevement en cours": "being picked",
+    "vide": "empty",
+    "archive": "archived",
+    "quarantaine": "quarantine",
+    "indisponible": "unavailable",
+    "plus recent (FIFO)": "newer (FIFO)",
+  },
+  det: {
+    "pas encore stocke": "not stored yet",
+    "identification en cours": "identifying",
+    "comptage en cours": "counting",
+    "transfert vers le rack": "moving to the rack",
+    "controle de coherence": "coherence check",
+    "autre commande": "another order",
+    "0 noyau": "0 cores",
+    "besoin deja couvert par des box plus anciens":
+      "demand already covered by older boxes",
+  },
+  detReadyIn: (h) => `ready in ${h} h`,
+  detDelta: (d, beam, weight) =>
+    `count delta = ${d} (beam ${beam} / weight ${weight})`,
+};
+
+export const FR = {
+  lang: "FR",
+  title: "Smart Core Warehouse",
+  subtitle: "SOPAL & SOPALTEC — NRW 8.0 INSAT",
+  clock: "Horloge simulée", speed: "Vitesse", jump6: "+6 h", reset: "Réinitialiser",
+  scenario: "Charger le scénario démo", more: "Plus", dbExplorer: "Base de données",
+  newRef: "Nouvelle référence", refCode: "Code", refLabel: "Libellé",
+  unitMass: "Masse unitaire (g)", capacity: "Capacité du box", color: "Couleur",
+  addRef: "Ajouter la référence", cancelRef: "Annuler",
+  refAdded: (ref) => `Référence ${ref} ajoutée`,
+  plant: "Modèle physique",
+  article: "Référence", qty: "Quantité", anomaly: "Injecter une anomalie",
+  arrive: "Le box arrive sur le convoyeur", quickBox: "Box rapide, sans ESP32",
+  env: "Climat de la zone de séchage", temp: "Température", hum: "Humidité",
+  cureNow: "Séchage requis actuel",
+  demand: "Demande de production", ask: "Demander des noyaux",
+  confirm: "Valider", cancel: "Annuler",
+  proposal: "Proposition automatique (FIFO)",
+  picks: "Box retenus", rejected: "Box écartés — et pourquoi",
+  noOrder: "Aucune commande. Exprimez un besoin de production.",
+  shortfall: "Manquant", allocated: "Alloué", requested: "Demandé",
+  warehouse: "Entrepôt",
+  kpiSlots: "Emplacements", kpiReady: "Prêts", kpiDrying: "En séchage",
+  kpiQuar: "Quarantaine", kpiCores: "Noyaux prêts", kpiFree: "Emplacements libres",
+  inventory: "Inventaire", box: "Box", ref: "Réf", state: "État",
+  slot: "Emplacement", cure: "Séchage", left: "Reste", conf: "Confiance",
+  counts: "Barrière / Pesée", stored: "Stocké à", age: "Âge",
+  byRef: "Stock par référence", fifoHead: "prochain sorti (FIFO)", none: "aucun prêt",
+  nextOut: "Prochain sorti (FIFO)", colReady: "Prêts", colDrying: "Séchage",
+  filterAll: "Toutes les références", kpiReserved: "Réservé",
+  events: "Journal", device: "ESP32", broker: "Broker",
+  online: "en ligne", offline: "hors ligne", mode: "Mode",
+  legend: "Couleurs", cores: "noyaux", boxes: "box",
+  refusedShort: "écartés",
+  st: {
+    INCOMING: "Arrivée", IDENTIFYING: "Identification", COUNTING: "Comptage",
+    STORING: "Rangement", DRYING: "Séchage", READY: "Prêt", RESERVED: "Réservé",
+    PICKING: "Prélèvement", EMPTY: "Vide", ARCHIVED: "Archivé",
+    QUARANTINE: "Quarantaine",
+  },
+  ev: {
+    box_in: "stocké", quarantine: "quarantaine", cured: "séché",
+    demand: "demande", pick_done: "prélevé", order_cancel: "annulée",
+    clock_jump: "horloge", env: "climat", article_new: "nouvelle référence",
+  },
+  // In FR the engine's own wording is already correct — this map only
+  // restores the accents it cannot carry through MQTT/SQLite safely.
+  rej: {
+    "en cours de reception": "en cours de réception",
+    "sechage insuffisant": "séchage insuffisant",
+    "reserve": "réservé",
+    "prelevement en cours": "prélèvement en cours",
+    "vide": "vide",
+    "archive": "archivé",
+    "quarantaine": "quarantaine",
+    "indisponible": "indisponible",
+    "plus recent (FIFO)": "plus récent (FIFO)",
+  },
+  det: {
+    "pas encore stocke": "pas encore stocké",
+    "identification en cours": "identification en cours",
+    "comptage en cours": "comptage en cours",
+    "transfert vers le rack": "transfert vers le rack",
+    "controle de coherence": "contrôle de cohérence",
+    "autre commande": "autre commande",
+    "0 noyau": "0 noyau",
+    "besoin deja couvert par des box plus anciens":
+      "besoin déjà couvert par des box plus anciens",
+  },
+  detReadyIn: (h) => `prêt dans ${h} h`,
+  detDelta: (d, beam, weight) =>
+    `écart de comptage = ${d} (barrière ${beam} / pesée ${weight})`,
+};
+
+// <<< THE ONE LINE TO FLIP FOR THE JURY >>>
+export const L = EN;
