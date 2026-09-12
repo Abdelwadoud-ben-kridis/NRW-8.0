@@ -3,3 +3,4 @@ __pycache__/
 scw.db
 scw.db-wal
 scw.db-shm
+server.log
