@@ -25,14 +25,11 @@ def _box(bid, ref, t_in, state, qty=40, req=24.0, **kw):
 
 # --- criterion 4: cure -------------------------------------------------------
 
-def test_cure_floor_is_never_violated():
-    assert E.required_cure_h(35.0, 10.0) == 24.0     # hot and dry: still 24 h
-    assert E.required_cure_h(22.0, 45.0) == 24.0     # reference conditions
-
-
-def test_cure_extends_in_cold_humid_room():
-    r = E.required_cure_h(16.0, 80.0)
-    assert r > 24.0 and round(r, 1) == 38.2
+def test_cure_is_fixed_24h_always():
+    # CDC requirement: exactly 24 h, the same for every box. No adaptive
+    # model -- contract 1.2 dropped that idea; climate is display-only now.
+    assert E.required_cure_h() == 24.0
+    assert E.CURE_FLOOR_H == 24.0
 
 
 def test_is_cured_boundary():
@@ -85,6 +82,16 @@ def test_fifo_picks_oldest_first():
     assert r["picks"][0]["box_id"] == "BOX-1"
 
 
+def test_fifo_tiebreak_is_numeric_not_lexicographic():
+    # Same t_in_sim (speed 0, or a scenario load): BOX-2 must sort before
+    # BOX-10 as a NUMBER, not as a string ("BOX-10" < "BOX-2" lexically).
+    boxes = [_box("BOX-10", "NY-114", 5 * H, "READY", qty=5),
+             _box("BOX-2", "NY-114", 5 * H, "READY", qty=5)]
+    r = E.fifo_allocate(boxes, "NY-114", 5, 100 * H)
+    assert r["picks"][0]["box_id"] == "BOX-2"
+    assert sorted(boxes, key=E.fifo_key)[0]["box_id"] == "BOX-2"
+
+
 def test_uncured_box_is_rejected_with_a_reason():
     boxes = [_box("BOX-1", "NY-114", 0.0, "DRYING")]
     r = E.fifo_allocate(boxes, "NY-114", 5, 10 * H)
@@ -129,15 +136,29 @@ def test_other_references_are_not_touched():
 # --- state machine -----------------------------------------------------------
 
 def test_partial_pick_keeps_t_in_sim():
-    b = _box("BOX-1", "NY-114", 5 * H, "PICKING", qty=40)
+    b = _box("BOX-1", "NY-114", 5 * H, "RESERVED", qty=40)
     patch = E.apply_pick(b, 10)
     assert patch["state"] == "READY" and patch["qty_available"] == 30
     assert "t_in_sim" not in patch          # FIFO position preserved
 
 
 def test_full_pick_empties_the_box():
-    b = _box("BOX-1", "NY-114", 5 * H, "PICKING", qty=10)
+    b = _box("BOX-1", "NY-114", 5 * H, "RESERVED", qty=10)
     assert E.apply_pick(b, 10)["state"] == "EMPTY"
+
+
+def test_apply_pick_refuses_take_over_available():
+    b = _box("BOX-1", "NY-114", 5 * H, "RESERVED", qty=10)
+    try:
+        E.apply_pick(b, 11)
+        assert False, "should have raised"
+    except ValueError:
+        pass
+    try:
+        E.apply_pick(b, 0)
+        assert False, "should have raised"
+    except ValueError:
+        pass
 
 
 def test_lock_expires_back_to_ready():
@@ -145,6 +166,8 @@ def test_lock_expires_back_to_ready():
              lock_expires_sim=10 * H)
     assert E.tick_box(b, 9 * H) is None
     assert E.tick_box(b, 11 * H)["state"] == "READY"
+    assert E.lock_expired(b, 9 * H) is False
+    assert E.lock_expired(b, 11 * H) is True
 
 
 def test_drying_becomes_ready_on_its_own():
@@ -156,6 +179,92 @@ def test_drying_becomes_ready_on_its_own():
 def test_illegal_transition_is_refused():
     assert E.can_transition("DRYING", "READY")
     assert not E.can_transition("DRYING", "PICKING")
+
+
+def test_box_birth_states():
+    assert E.can_transition(None, "DRYING")
+    assert E.can_transition(None, "QUARANTINE")
+    assert not E.can_transition(None, "READY")
+
+
+def test_reserved_goes_directly_to_empty_or_ready():
+    # PICKING is a real-world stage but never a persisted box.state value --
+    # confirm() writes RESERVED -> EMPTY or RESERVED -> READY directly.
+    assert E.can_transition("RESERVED", "EMPTY")
+    assert E.can_transition("RESERVED", "READY")
+    assert not E.can_transition("RESERVED", "PICKING")
+
+
+def test_archived_is_terminal():
+    assert not E.can_transition("ARCHIVED", "READY")
+    assert not E.can_transition("ARCHIVED", "DRYING")
+
+
+def test_order_transitions():
+    assert E.can_transition_order(None, "PENDING")
+    assert E.can_transition_order(None, "IMPOSSIBLE")
+    assert E.can_transition_order("PENDING", "DONE")
+    assert E.can_transition_order("PENDING", "CANCELLED")
+    assert not E.can_transition_order("DONE", "CANCELLED")
+    assert not E.can_transition_order("CANCELLED", "DONE")
+    assert not E.can_transition_order("IMPOSSIBLE", "DONE")
+
+
+# --- arrival dedup (idempotency) ---------------------------------------------
+
+def test_dedup_open_window_resolves():
+    window = {"ref": "NY-114", "status": "OPEN", "resolved_at": None}
+    fp = E.box_fingerprint("NY-114", 37, 9420.5, "1.0")
+    v = E.dedup_verdict(window, fp, "NY-114", now_mono=100.0,
+                        last_unsolicited=None, grace_s=15.0,
+                        unsolicited_dedup_s=5.0)
+    assert v["action"] == "resolve_window"
+
+
+def test_dedup_late_answer_after_l1_is_ignored():
+    # L1 already fired and resolved the window 3 s ago; the real board
+    # answers late with the same ref -- must not create a second box.
+    window = {"ref": "NY-114", "status": "RESOLVED_L1", "resolved_at": 97.0}
+    fp = E.box_fingerprint("NY-114", 37, 9420.5, "1.0")
+    v = E.dedup_verdict(window, fp, "NY-114", now_mono=100.0,
+                        last_unsolicited=None, grace_s=15.0,
+                        unsolicited_dedup_s=5.0)
+    assert v["action"] == "ignore"
+
+
+def test_dedup_late_answer_outside_grace_is_a_new_box():
+    window = {"ref": "NY-114", "status": "RESOLVED_L1", "resolved_at": 50.0}
+    fp = E.box_fingerprint("NY-114", 37, 9420.5, "1.0")
+    v = E.dedup_verdict(window, fp, "NY-114", now_mono=100.0,
+                        last_unsolicited=None, grace_s=15.0,
+                        unsolicited_dedup_s=5.0)
+    assert v["action"] == "create"
+
+
+def test_dedup_unsolicited_repeat_is_ignored():
+    fp = E.box_fingerprint("NY-114", 37, 9420.5, "1.0")
+    last = (fp, 98.0)
+    v = E.dedup_verdict(None, fp, "NY-114", now_mono=100.0,
+                        last_unsolicited=last, grace_s=15.0,
+                        unsolicited_dedup_s=5.0)
+    assert v["action"] == "ignore"
+
+
+def test_dedup_unsolicited_different_box_is_created():
+    fp1 = E.box_fingerprint("NY-114", 37, 9420.5, "1.0")
+    fp2 = E.box_fingerprint("NY-114", 40, 10200.0, "1.0")
+    v = E.dedup_verdict(None, fp2, "NY-114", now_mono=100.0,
+                        last_unsolicited=(fp1, 99.0), grace_s=15.0,
+                        unsolicited_dedup_s=5.0)
+    assert v["action"] == "create"
+
+
+def test_dedup_no_window_no_history_is_created():
+    fp = E.box_fingerprint("NY-114", 37, 9420.5, "1.0")
+    v = E.dedup_verdict(None, fp, "NY-114", now_mono=100.0,
+                        last_unsolicited=None, grace_s=15.0,
+                        unsolicited_dedup_s=5.0)
+    assert v["action"] == "create"
 
 
 # --- slot policy -------------------------------------------------------------

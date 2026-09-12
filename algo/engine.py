@@ -16,18 +16,42 @@ box              a plastic crate holding N cores of one article.
 
 from __future__ import annotations
 
+import re
+
 # ---------------------------------------------------------------------------
 # Constants (must match firmware/sketch.ino and docs/contracts.md)
 # ---------------------------------------------------------------------------
 
 TARE_G = 1800.0            # empty crate 51.5x32.5x17.5 cm, 1.8 kg
-CURE_FLOOR_H = 24.0        # CDC hard requirement: >= 24 h. Never violated.
-LOCK_TTL_H = 0.5           # a RESERVED box auto-releases after 30 simulated min
+
+# CDC hard requirement: every box dries exactly 24 h, no exceptions. This is
+# NOT a floor for an adaptive model -- the CDC (cahier des charges) never asks
+# for one, and contract 1.2 drops the earlier adaptive-cure idea entirely.
+# Temperature/RH are kept only as arrival evidence on the box (what the ESP32
+# measured at that moment) and displayed on the HMI; they never feed cure
+# math. See docs/contracts.md CONTRACT VERSION 1.2 and the plan's decision
+# log for why (2026-09-12).
+CURE_FLOOR_H = 24.0
+
+# a RESERVED box auto-releases after this many SIMULATED hours if nobody
+# confirms or cancels the order (also mirrored in backend/config.py::LOCK_TTL_H,
+# which is what the backend actually uses -- this default is for callers of
+# this module in isolation, e.g. tests and a whiteboard).
+LOCK_TTL_H = 2.0
 
 STATES = (
     "INCOMING", "IDENTIFYING", "COUNTING", "STORING", "DRYING", "READY",
     "RESERVED", "PICKING", "EMPTY", "ARCHIVED", "QUARANTINE",
 )
+
+# States actually WRITTEN to boxes.state by this system. INCOMING,
+# IDENTIFYING, COUNTING, STORING and PICKING are virtual/conceptual stages --
+# named in docs/contracts.md and in event payloads for narrative clarity, but
+# a box is born directly into DRYING or QUARANTINE, and a full pick moves
+# RESERVED straight to EMPTY without ever being written as PICKING. See
+# docs/database-guide.md for the persisted-vs-virtual distinction.
+PERSISTED_STATES = ("DRYING", "READY", "RESERVED", "EMPTY", "QUARANTINE",
+                    "ARCHIVED")
 
 # states a box must NOT be in to be pickable, with the reason shown to the jury
 _NOT_PICKABLE = {
@@ -45,30 +69,22 @@ _NOT_PICKABLE = {
 
 
 # ---------------------------------------------------------------------------
-# 1. Cure model  (criterion 4, and the primary innovation)
+# 1. Cure model  (criterion 4)
 # ---------------------------------------------------------------------------
+# Fixed 24 h for every box, every reference, every climate -- the CDC's exact
+# requirement, no more and no less. An earlier draft explored an adaptive
+# model that extended the requirement in a cold/humid room; the CDC does not
+# ask for that, so it was dropped in contract 1.2. Temperature/RH remain on
+# the HMI and on each box's arrival evidence for traceability, but are pure
+# display -- nothing here reads them.
 
-def required_cure_h(t_c: float, rh: float, floor_h: float = CURE_FLOOR_H) -> float:
-    """Adaptive cure time from curing-room climate.
+def required_cure_h() -> float:
+    """The one cure requirement in this system: exactly 24 h, always.
 
-    The CDC fixes a 24 h minimum. Real resin-bonded sand cures slower when the
-    room is cold or humid, so a fixed 24 h is either wasteful or unsafe. This
-    model can only EXTEND the requirement, never shorten it below the floor.
-
-        k_rh : +1.2 % per point of RH above 45 %
-        k_t  : +2.0 % per degree below 22 C
-
-    Both factors are clamped at 1.0 on the favourable side, so a warm dry room
-    gives exactly the 24 h floor and nothing shorter.
-
-    >>> round(required_cure_h(22.0, 45.0), 2)
+    >>> required_cure_h()
     24.0
-    >>> round(required_cure_h(16.0, 80.0), 1)
-    38.2
     """
-    k_rh = 1.0 + max(0.0, rh - 45.0) * 0.012
-    k_t = 1.0 + max(0.0, 22.0 - t_c) * 0.020
-    return max(floor_h, floor_h * k_rh * k_t)
+    return CURE_FLOOR_H
 
 
 def cure_progress(t_in_sim: float, required_h: float, now_sim: float) -> float:
@@ -210,6 +226,28 @@ def choose_slot(free_slots: list, ref: str) -> dict | None:
 # 4. FIFO allocation  (criteria 5 + 6 — 30 pts, the heart of the demo)
 # ---------------------------------------------------------------------------
 
+_ID_NUM_RE = re.compile(r"(\d+)$")
+
+
+def fifo_key(box: dict) -> tuple:
+    """The one true FIFO sort key: (t_in_sim, box sequence).
+
+    docs/contracts.md says the tiebreak is "box_id", but box_id ("BOX-2",
+    "BOX-10", ...) must be compared as the NATURAL NUMBER it encodes, not as
+    a string -- otherwise "BOX-10" sorts before "BOX-2" and two boxes stored
+    in the same simulated instant (speed 0, or a scenario load) tiebreak
+    backwards. Every place that orders boxes for FIFO purposes (allocation,
+    the inventory table, the by-ref FIFO head) must use this same key so the
+    three views of "what's next" never disagree.
+
+    Falls back to the raw id string if it has no trailing digits, so an
+    unexpected id shape cannot raise -- it just loses the numeric tiebreak.
+    """
+    bid = box["box_id"]
+    m = _ID_NUM_RE.search(bid)
+    return (box["t_in_sim"], int(m.group(1)) if m else bid)
+
+
 def fifo_allocate(boxes: list, ref: str, qty: int, now_sim: float,
                   order_id: str = "ORD-0") -> dict:
     """Answer the CDC's question: which box do I use first, and why not the others?
@@ -224,8 +262,8 @@ def fifo_allocate(boxes: list, ref: str, qty: int, now_sim: float,
     remaining = int(qty)
 
     candidates = [b for b in boxes if b["article_ref"] == ref]
-    # deterministic FIFO key: oldest stored first, box_id breaks ties
-    candidates.sort(key=lambda b: (b["t_in_sim"], b["box_id"]))
+    # deterministic FIFO key: oldest stored first, numeric box_id breaks ties
+    candidates.sort(key=fifo_key)
 
     for b in candidates:
         state = b["state"]
@@ -292,24 +330,54 @@ def fifo_allocate(boxes: list, ref: str, qty: int, now_sim: float,
 # ---------------------------------------------------------------------------
 # 5. State machine
 # ---------------------------------------------------------------------------
-
+# This table lists only transitions between PERSISTED states (see
+# PERSISTED_STATES above). `None` as the "old" state means "box creation" --
+# a box is born directly into DRYING or QUARANTINE; the conceptual
+# INCOMING -> IDENTIFYING -> COUNTING -> STORING chain from docs/contracts.md
+# is never written to the database, only narrated in the creation event's
+# payload. Likewise RESERVED -> EMPTY is a direct write: PICKING is a
+# real-world stage (the crane is physically extracting cores) but this
+# system never persists it as a box.state value -- the whole
+# reserve-then-pick sequence is one atomic backend operation, not two.
 _TRANSITIONS = {
-    "INCOMING":    {"IDENTIFYING", "QUARANTINE"},
-    "IDENTIFYING": {"COUNTING", "QUARANTINE"},
-    "COUNTING":    {"STORING", "QUARANTINE"},
-    "STORING":     {"DRYING", "QUARANTINE"},
+    None:          {"DRYING", "QUARANTINE"},
     "DRYING":      {"READY", "QUARANTINE"},
     "READY":       {"RESERVED", "QUARANTINE", "ARCHIVED"},
-    "RESERVED":    {"PICKING", "READY"},          # READY = lock expired/cancelled
-    "PICKING":     {"READY", "EMPTY"},            # READY = partial pick
+    "RESERVED":    {"READY", "EMPTY"},            # READY: cancel/expiry/partial pick
     "EMPTY":       {"ARCHIVED"},
-    "QUARANTINE":  {"ARCHIVED", "INCOMING"},      # INCOMING = operator re-presents it
+    "QUARANTINE":  {"ARCHIVED"},                  # operator re-presentation is out of
+                                                   # scope: no endpoint implements it
     "ARCHIVED":    set(),
 }
 
 
-def can_transition(old: str, new: str) -> bool:
+def can_transition(old: str | None, new: str) -> bool:
+    """Is `old -> new` a legal PERSISTED box.state change?
+
+    Pass `old=None` to check whether `new` is a legal birth state.
+    """
     return new in _TRANSITIONS.get(old, set())
+
+
+# Order lifecycle, mirroring the box table above. `None` -> the two possible
+# outcomes of a fresh POST /api/demand. PENDING -> DONE is a confirm;
+# PENDING -> CANCELLED covers both an explicit cancel and an automatic
+# reservation-lock expiry (backend/warehouse.py logs which one happened).
+# Re-confirming a DONE order or re-cancelling a CANCELLED one is deliberately
+# NOT a transition here -- backend/warehouse.py treats repeating either as a
+# harmless no-op instead of looking it up in this table, so idempotency is
+# handled once, explicitly, rather than by quietly allowing DONE -> DONE.
+_ORDER_TRANSITIONS = {
+    None:         {"PENDING", "IMPOSSIBLE"},
+    "PENDING":    {"DONE", "CANCELLED"},
+    "IMPOSSIBLE": set(),
+    "DONE":       set(),
+    "CANCELLED":  set(),
+}
+
+
+def can_transition_order(old: str | None, new: str) -> bool:
+    return new in _ORDER_TRANSITIONS.get(old, set())
 
 
 def tick_box(box: dict, now_sim: float) -> dict | None:
@@ -330,8 +398,20 @@ def tick_box(box: dict, now_sim: float) -> dict | None:
 
 
 def apply_pick(box: dict, take: int) -> dict:
-    """Consume `take` cores. Partial picks keep t_in_sim — re-stamping breaks FIFO."""
-    left = max(0, int(box["qty_available"]) - int(take))
+    """Consume `take` cores. Partial picks keep t_in_sim — re-stamping breaks FIFO.
+
+    Raises ValueError if `take` is not a positive integer no greater than
+    qty_available. The caller (backend/warehouse.py) treats that as a failed
+    precondition inside a transaction and rolls the whole confirm back,
+    rather than silently clamping to whatever was left -- a stale or
+    tampered-with order payload must never short-change or over-deduct a box.
+    """
+    avail = int(box["qty_available"])
+    take = int(take)
+    if take <= 0 or take > avail:
+        raise ValueError("invalid take %r for box %s (qty_available=%d)"
+                         % (take, box.get("box_id"), avail))
+    left = avail - take
     return {
         "qty_available": left,
         "state": "EMPTY" if left == 0 else "READY",
@@ -339,3 +419,81 @@ def apply_pick(box: dict, take: int) -> dict:
         "lock_expires_sim": None,
         # t_in_sim deliberately untouched
     }
+
+
+# ---------------------------------------------------------------------------
+# 6. Reservation-lock expiry  (pure predicate, the clock/DB stay in warehouse.py)
+# ---------------------------------------------------------------------------
+
+def lock_expired(box: dict, now_sim: float) -> bool:
+    """Has this RESERVED box's lock run out?
+
+    Used by backend/warehouse.py to find whole ORDERS to expire (every box an
+    order reserved shares that order's lock_expires_sim, since demand() sets
+    them together) -- this function only answers the box-level question.
+    """
+    if box.get("state") != "RESERVED":
+        return False
+    exp = box.get("lock_expires_sim")
+    return exp is not None and now_sim >= exp
+
+
+# ---------------------------------------------------------------------------
+# 7. Arrival dedup  (criterion: one physical box_done -> one database box)
+# ---------------------------------------------------------------------------
+# Pure verdict functions only -- backend/main.py owns the actual arrival
+# window (open/resolved, epoch) and the monotonic clock; this module just
+# answers "given this window and this incoming message, what should happen?"
+# so the decision itself is unit-testable without MQTT, asyncio or a clock.
+# See docs/contracts.md CONTRACT VERSION 1.2 §1.3 for the rationale: nothing
+# new is added to the box_done payload, so this works with any device
+# (Wokwi, tools/fake_device.py, the real board) unmodified.
+
+def box_fingerprint(ref: str, count_beam: int, gross_g: float,
+                    fw: str | None) -> tuple:
+    """A cheap identity for a physical box_done payload, gram rounded to 0.1
+    so the plant model's noise cannot make one real box look like two."""
+    return (ref, int(count_beam), round(float(gross_g), 1), fw or "")
+
+
+def dedup_verdict(window: dict | None, fp: tuple, ref: str, now_mono: float,
+                  last_unsolicited: tuple | None, grace_s: float,
+                  unsolicited_dedup_s: float) -> dict:
+    """Decide what an incoming box_done should do to the database.
+
+    window   -- the arrival window this backend is tracking for the box
+                currently expected on the conveyor, or None:
+                {"ref": str, "status": "OPEN"|"RESOLVED_L0"|"RESOLVED_L1",
+                 "resolved_at": float|None}
+    fp       -- box_fingerprint(...) of the incoming message
+    ref      -- the incoming message's own `ref` field
+    now_mono -- time.monotonic() at receipt (transport domain, never t_sim)
+    last_unsolicited -- (fingerprint, mono_time) of the last box accepted
+                with no open window, or None if there hasn't been one yet
+
+    Returns {"action": "create" | "resolve_window" | "ignore",
+             "reason": str | None}
+
+        create         -- store a new box (no window, or window not a match)
+        resolve_window -- store a new box AND mark the window resolved (this
+                          is the normal L0 path: the device answered in time)
+        ignore         -- a duplicate; do not touch the database
+    """
+    if window is not None and window["status"] == "OPEN" and window["ref"] == ref:
+        return {"action": "resolve_window", "reason": None}
+
+    if window is not None and window["status"] in ("RESOLVED_L0", "RESOLVED_L1"):
+        resolved_at = window.get("resolved_at")
+        if resolved_at is not None and (now_mono - resolved_at) <= grace_s:
+            return {"action": "ignore",
+                    "reason": "duplicate: this arrival was already resolved "
+                             "(%s)" % window["status"]}
+
+    if last_unsolicited is not None:
+        last_fp, last_t = last_unsolicited
+        if last_fp == fp and (now_mono - last_t) <= unsolicited_dedup_s:
+            return {"action": "ignore",
+                    "reason": "identical unsolicited box_done repeated "
+                             "within %.0f s" % unsolicited_dedup_s}
+
+    return {"action": "create", "reason": None}
