@@ -7,14 +7,17 @@
 
 import { L, setLang } from "./labels.js";
 import { initTwin, updateTwin, setCamera, toggleFollow, COLOR } from "./twin.js";
+import { REPLAY, replayApi, startReplay } from "./replay.js";
 
 const $ = (id) => document.getElementById(id);
+// On GitHub Pages (tools/build_pages.py) there is no backend: replay.js
+// answers from a recorded run and refuses every POST as read-only.
 const api = (path, body) =>
-  fetch("/api" + path, {
+  (REPLAY ? replayApi(path, body) : fetch("/api" + path, {
     method: body === undefined ? "GET" : "POST",
     headers: { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
-  }).then((r) => r.json()).then((res) => {
+  }).then((r) => r.json())).then((res) => {
     // A refused operation (backend/warehouse.py::OpError -> 400/404/409)
     // still resolves as JSON with an `error` field -- surface it on the
     // banner instead of failing silently, so a double-press or a stale
@@ -73,7 +76,7 @@ function paintLabels() {
   $("btn-lang").title = L.lang === "EN" ? "Français" : "English";
   $("btn-sim").title = L.simControls;
   $("btn-shortcuts").title = L.shortcuts;
-  $("contract-chip").textContent = `${L.contract} 1.5`;
+  $("contract-chip").textContent = `${L.contract} ${ST ? ST.contract_version : "…"}`;
   $("db-health").title = L.database;
 
   $("h-plant").textContent = L.plant;
@@ -391,6 +394,7 @@ function deriveStage(st) {
 function render(st) {
   ST = st;
   $("clock").innerHTML = `${st.clock_label} <small id="clock-speed">×${st.speed}</small>`;
+  $("contract-chip").textContent = `${L.contract} ${st.contract_version}`;   // was hardcoded "1.5"
 
   document.querySelectorAll("#seg-speed [data-speed]").forEach((b) =>
     b.classList.toggle("on", +b.dataset.speed === st.speed));
@@ -730,7 +734,7 @@ function renderBatches(st) {
 // ---------------------------------------------------------------------------
 async function refreshDbHealth() {
   try {
-    const r = await fetch("/api/db/check").then((x) => x.json());
+    const r = await api("/db/check");
     const el = $("db-health");
     const sevCls = { PASS: "on", WARN: "mode", FAIL: "off" }[r.overall] || "off";
     const sevTxt = { PASS: L.dbPass, WARN: L.dbWarn, FAIL: L.dbFail }[r.overall] || r.overall;
@@ -1114,10 +1118,11 @@ async function boot() {
     e.target.style.borderColor = toggleFollow() ? "#22d3ee" : "";
 
   setupResizeGutters();
-  connect();
+  if (REPLAY) startReplay(render, setSysStatus);
+  else connect();
   renderLog();
   refreshDbHealth();
-  setInterval(renderLog, 4000);
+  setInterval(renderLog, REPLAY ? 1000 : 4000);
   setInterval(refreshDbHealth, 8000);
 }
 

@@ -239,7 +239,7 @@ let conveyorBeam;
 function loadOptionalModels() {
   const loader = new GLTFLoader();
   const tryLoad = (file, onOk) =>
-    loader.load("/static/models/" + file,
+    loader.load(new URL("models/" + file, import.meta.url).href,   // /static/models/ or Pages
       (gltf) => { try { onOk(gltf.scene); console.log("[twin] loaded", file); }
                   catch (e) { console.warn(e); } },
       undefined,

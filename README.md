@@ -3,6 +3,15 @@
 NRW 8.0 @ INSAT · défi SOPAL & SOPALTEC · 160 points.
 **This repo already runs.** Nothing in it is a sketch or a TODO.
 
+**See it without installing anything:**
+**https://abdelwadoud-ben-kridis.github.io/NRW-8.0/** plays a recorded run of
+the full demo (scenario, a live-device arrival, the mismatch caught by vision,
+a FIFO skip, the crane pick, curing, the refused re-weigh) in the real
+dashboard and 3D twin. It is a read-only replay; driving the system still
+needs `./run.sh`. Re-record `pages/replay.json` with
+`python tools/record_replay.py` against an isolated server (it refuses :8000);
+`.github/workflows/pages.yml` rebuilds the site on push.
+
 You own the busiest role: the backend, the WebSocket, the HMI, the 3D twin, and
 the keyboard during the demo. Everything below is written for that job.
 

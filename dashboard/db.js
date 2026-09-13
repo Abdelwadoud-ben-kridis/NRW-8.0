@@ -2,7 +2,18 @@
 // backend (no CORS). Every request here hits a read-only /api/db/* endpoint.
 
 const $ = (id) => document.getElementById(id);
-const api = (path) => fetch("/api/db" + path).then((r) => r.json());
+// On GitHub Pages (tools/build_pages.py) there is no backend: answer from the
+// recording's end-of-run database views (tools/record_replay.py).
+const replayDb = (rec, path) => {
+  if (rec.db[path]) return rec.db[path];
+  const m = path.match(/^\/table\/([^?]+)/);       // unrecorded search/page: first page
+  if (m) return rec.db[`/table/${m[1]}?limit=50&offset=0&q=`] || { columns: [], rows: [], total: 0 };
+  return path.startsWith("/box/") ? { detail: "not in the recording" } : {};
+};
+const api = (path) => window.SCW_REPLAY
+  ? (window.scwReplay ||= fetch(window.SCW_REPLAY).then((r) => r.json()))
+      .then((rec) => replayDb(rec, path))
+  : fetch("/api/db" + path).then((r) => r.json());
 
 // Reused everywhere identity needs a color: same hex the live dashboard uses
 // for box state (see dashboard/style.css .s-STATE and twin.js COLOR), so a
