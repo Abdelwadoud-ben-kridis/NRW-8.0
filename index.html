@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<script>window.SCW_REPLAY = "replay.json";</script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Smart Core Warehouse — NRW 8.0</title>
+<link rel="stylesheet" href="./style.css">
+<!-- Three.js is VENDORED in /static/vendor. No CDN, no npm, no bundler:
+     the venue wifi cannot break your 25-point criterion. -->
+<script type="importmap">
+{ "imports": {
+    "three": "./vendor/three.module.js",
+    "three/addons/": "./vendor/"
+} }
+</script>
+</head>
+<body>
+<div id="app">
+
+  <!-- ============================================================
+       TOP APPLICATION BAR
+       ============================================================ -->
+  <div id="top">
+    <div class="brand">
+      <h1 id="t-title"></h1>
+      <div class="sub" id="t-sub"></div>
+    </div>
+    <div class="divider"></div>
+    <div class="statuscluster">
+      <span class="sysstatus" id="sys-status"><i class="dot"></i><span id="sys-status-txt"></span></span>
+      <span class="contractchip" id="contract-chip"></span>
+      <a class="pill dbh" id="db-health" href="db.html" title="">…</a>
+    </div>
+    <div class="spacer"></div>
+
+    <div class="topgroup">
+      <div class="clock" id="clock">J+0 <small id="clock-speed">×60</small></div>
+      <div class="seg" id="seg-speed">
+        <button data-speed="1">&times;1</button>
+        <button data-speed="60">&times;60</button>
+        <button data-speed="3600">&times;3600</button>
+      </div>
+      <button class="ghost nowrap" id="jump6"></button>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="topgroup">
+      <span class="pill mode" id="p-mode">L0</span>
+      <span class="pill off" id="p-dev">ESP32</span>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="topgroup">
+      <button class="ghost nowrap" id="btn-scenario"></button>
+      <button class="ghost iconbtn" id="btn-sim" title="">&#9881;</button>
+      <button class="ghost iconbtn" id="btn-shortcuts" title="">?</button>
+      <button class="ghost iconbtn langtoggle" id="btn-lang" title="">EN</button>
+      <div class="menu">
+        <button class="ghost" id="btn-more" aria-haspopup="true" aria-expanded="false">&#8943;</button>
+        <div class="menu-pop" id="more-pop" hidden>
+          <button class="ghost" id="btn-newref"></button>
+          <button class="ghost" id="btn-reset"></button>
+          <a class="ghost" id="lnk-db" href="db.html"></a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       KPI RIBBON — filled by app.js from st.kpi
+       ============================================================ -->
+  <div id="kpi-ribbon"></div>
+
+  <!-- ============================================================
+       "+ New reference" modal — POST /api/articles (contracts.md §2)
+       ============================================================ -->
+  <div id="refModal" class="modal-wrap" hidden>
+    <div class="modal">
+      <h2 id="h-newref"></h2>
+      <label id="l-refcode"></label>
+      <input type="text" id="nref-ref" placeholder="NY-450" maxlength="24">
+      <label id="l-reflabel"></label>
+      <input type="text" id="nref-label" placeholder="Noyau bride 450" maxlength="64">
+      <div class="row">
+        <div><label id="l-refmass"></label>
+          <input type="number" id="nref-mass" min="0.1" step="0.1" placeholder="310"></div>
+        <div><label id="l-refcolor"></label>
+          <input type="color" id="nref-color" value="#4f8cff"></div>
+      </div>
+      <div class="muted" id="nref-err" hidden></div>
+      <div class="row tight">
+        <button class="primary" id="btn-nref-add"></button>
+        <button class="ghost" id="btn-nref-cancel"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       SIMULATION CONTROLS DRAWER — the engineering controls, kept out
+       of the operator's main view (plan §18 / spec "SIMULATION CONTROLS")
+       ============================================================ -->
+  <div id="sim-drawer" class="drawer-wrap">
+    <div class="drawer">
+      <div class="drawer-head"><h1 id="h-plant"></h1><button class="ghost iconbtn" id="sim-close">&times;</button></div>
+      <h2 id="h-barcode"></h2>
+      <div class="notice" id="bc-notice"></div>
+      <div class="row">
+        <div class="f1"><label id="l-bcid"></label>
+          <input type="text" id="bc-id" placeholder="BC-1042" maxlength="24"></div>
+        <div class="f1"><label id="l-bcmass"></label>
+          <input type="number" id="bc-mass" min="0.1" step="0.1" placeholder="206"></div>
+      </div>
+      <div class="row tight">
+        <button class="ghost" id="btn-bc-register"></button>
+      </div>
+      <div class="muted" id="bc-err" hidden></div>
+
+      <div class="row">
+        <div class="f2"><label id="l-art"></label><select id="art"></select></div>
+        <div class="f1"><label id="l-qty"></label>
+          <input type="number" id="qty" value="37" min="1" max="80"></div>
+      </div>
+      <label id="l-bcpick"></label>
+      <select id="bc-pick"></select>
+      <label id="l-ano"></label>
+      <select id="ano"></select>
+      <button class="primary" id="btn-arrive"></button>
+      <button class="textlink" id="btn-quick"></button>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       SHORTCUTS OVERLAY
+       ============================================================ -->
+  <div id="shortcuts-drawer" class="drawer-wrap">
+    <div class="drawer">
+      <div class="drawer-head"><h1 id="h-shortcuts"></h1><button class="ghost iconbtn" id="shortcuts-close">&times;</button></div>
+      <div class="shortcuts-grid" id="shortcuts-list"></div>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       RESIZE HANDLES — drag to resize left/mid/right/inv/log against
+       each other. gutR and gutR2 are the same visual line (mid|right in
+       the main row, inv|log in the bottom row) since grid-template-areas
+       can't reuse one area name across a row split by gutH.
+       ============================================================ -->
+  <div class="gut gut-v" id="gutL" data-gut="left"></div>
+  <div class="gut gut-v" id="gutR" data-gut="right"></div>
+  <div class="gut gut-h" id="gutH" data-gut="bottom"></div>
+  <div class="gut gut-v" id="gutR2" data-gut="right"></div>
+
+  <!-- ============================================================
+       LEFT COLUMN — live operation, ESP32, curing, crane, quarantine
+       ============================================================ -->
+  <div id="left">
+    <div class="card" id="stagecard">
+      <h2 id="h-liveop"></h2>
+      <div class="stagebox">
+        <div class="stageicon" id="stage-icon">&#9679;</div>
+        <div>
+          <div class="stagelabel" id="stage-label">—</div>
+          <div class="stagesub" id="stage-sub"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card esp32">
+      <h2 id="h-esp32"></h2>
+      <div class="esp32-head">
+        <span class="pill off" id="esp32-online"></span>
+        <span class="esp32-state st-IDLE" id="esp32-state">IDLE</span>
+      </div>
+      <div class="esp32-grid">
+        <div class="esp32-metric"><div class="v" id="esp32-beam">—</div><div class="k" id="esp32-beam-k"></div></div>
+        <div class="esp32-metric"><div class="v" id="esp32-mass">—</div><div class="k" id="esp32-mass-k"></div></div>
+      </div>
+      <div class="esp32-foot">
+        <span id="esp32-stable"></span>
+        <span id="esp32-lastseen"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 id="h-cure"></h2>
+      <div class="cureline"><b id="v-cure">24.0 h</b></div>
+    </div>
+
+    <div class="card">
+      <h2 id="h-curing"><span id="h-curing-txt"></span><span class="cnt" id="curing-cnt"></span></h2>
+      <div class="curelist" id="curing-list"></div>
+    </div>
+
+    <div class="card">
+      <h2 id="h-crane"></h2>
+      <div id="crane-body"></div>
+    </div>
+
+    <div class="card" id="quarcard" hidden>
+      <h2><span id="h-quar-txt"></span><span class="cnt" id="quar-cnt"></span></h2>
+      <div id="quar-list"></div>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       CENTER — 2D rack visualisation (primary) / 3D twin (secondary)
+       ============================================================ -->
+  <div id="mid">
+    <div class="viewport-tabs">
+      <button id="tab-rack" class="on"></button>
+      <button id="tab-twin"></button>
+    </div>
+    <div id="banner"></div>
+
+    <div id="rackwrap">
+      <div id="rackview"><div class="faces" id="rack-faces"></div></div>
+      <div id="rack-legend"></div>
+      <div id="slot-inspector">
+        <button class="ghost iconbtn close" id="insp-close">&times;</button>
+        <div id="insp-body"></div>
+      </div>
+    </div>
+
+    <div id="twinwrap" hidden>
+      <canvas id="cv"></canvas>
+      <div id="legend"></div>
+      <div id="cams">
+        <button class="ghost" data-cam="iso">Iso</button>
+        <button class="ghost" data-cam="aisle">Aisle</button>
+        <button class="ghost" data-cam="front">Front</button>
+        <button class="ghost" data-cam="top">Top</button>
+        <button class="ghost nowrap" id="btn-follow">Follow crane</button>
+      </div>
+      <div id="hud"></div>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       RIGHT COLUMN — stock by ref, production demand, FIFO evidence,
+       reservation panel
+       ============================================================ -->
+  <div id="right">
+    <h2 id="h-byref"></h2>
+    <div class="rsec" id="byref-wrap">
+      <table id="byref" class="grid">
+        <colgroup>
+          <col style="width:66px"><col style="width:48px">
+          <col style="width:56px"><col>
+        </colgroup>
+        <thead></thead><tbody></tbody>
+      </table>
+    </div>
+
+    <h2 id="h-dem"></h2>
+    <div class="row">
+      <div class="f2"><label id="l-dbox"></label><select id="dbox"></select></div>
+    </div>
+    <div class="muted" id="dem-avail"></div>
+    <button class="primary" id="btn-demand"></button>
+    <button class="textlink" id="btn-demand-oldest"></button>
+
+    <h2 id="h-prop"></h2>
+    <div class="rsec" id="order"></div>
+    <div class="row tight">
+      <button class="ghost" id="btn-confirm"></button>
+      <button class="ghost" id="btn-cancel"></button>
+    </div>
+
+    <h2 id="h-pending"></h2>
+    <div class="rsec" id="pending-orders"></div>
+
+    <h2 id="h-batches"></h2>
+    <div class="rsec" id="batches-pending"></div>
+  </div>
+
+  <!-- ============================================================
+       BOTTOM LEFT+CENTER — inventory table (BOX/REF/LABEL/QTY/
+       AVAILABLE/STATE/SLOT/ARRIVAL/CURE/CONFIDENCE/LOCK)
+       ============================================================ -->
+  <div id="inv">
+    <div class="secthead">
+      <h2 id="h-inv"></h2>
+      <input type="text" id="invsearch">
+      <select id="filt"></select>
+    </div>
+    <div class="tblwrap">
+      <table id="invt" class="grid">
+        <colgroup>
+          <col style="width:70px"><col style="width:64px"><col style="width:130px">
+          <col style="width:52px"><col style="width:60px"><col style="width:88px">
+          <col style="width:70px"><col style="width:78px"><col style="width:84px">
+          <col style="width:72px"><col style="width:56px">
+        </colgroup>
+        <thead></thead><tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       BOTTOM RIGHT — live event log (flight recorder)
+       ============================================================ -->
+  <div id="log">
+    <div class="secthead"><h2 id="h-log"></h2></div>
+    <div id="logbody"></div>
+  </div>
+
+</div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>
