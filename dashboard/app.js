@@ -218,6 +218,8 @@ const tDet = (s) => {
   if (m) return L.detReusedBarcode(m[1]);
   m = /^vision : ref\. (\S+) detectee, code-barre (\S+) annonce (\S+)$/.exec(s);
   if (m) return L.detVisionMismatch(m[1], m[2], m[3]);
+  m = /^vision : ref\. (\S+) detectee a la reception, code-barre (\S+) annonce (\S+) -- relecture vision requise$/.exec(s);
+  if (m) return L.detVisionRecount(m[1], m[2], m[3]);
   m = /^ecart de comptage : pesee (\d+), vision (\d+) noyaux$/.exec(s);
   if (m) return L.detCountGap(m[1], m[2]);
   return s;
@@ -472,7 +474,7 @@ function render(st) {
                 <span>${L.perCore} <b>${m[3]} g</b></span>
                 <span>${L.gap} <b>${m[4]} g</b></span></div>` : ""}
         <div class="row tight">
-          <input type="number" min="0" class="f1" data-regross placeholder="${L.netMass}" value="${b.gross_g}">
+          <input type="number" min="0" class="f1" data-regross placeholder="${L.grossMass}" title="${L.grossMass} (g)" value="${b.gross_g}">
           <button class="ghost" data-act="recount" ${busy ? "disabled" : ""}>${L.recount}</button>
           <button class="ghost" data-act="archive" ${busy ? "disabled" : ""}>${L.archive}</button>
         </div>
@@ -840,7 +842,11 @@ function updateDemandHint() {
   const over = qty > avail;
   $("dem-avail").textContent = over ? L.demandTooMuch(avail) : L.demandAvail(avail);
   $("dem-avail").classList.toggle("over", over);
-  return !over && avail > 0;
+  // A warning, never a block (contract 1.10): asking for more than is READY
+  // is exactly how the backend's own answer gets shown -- a refusal with
+  // reasons and an ETA, or a production batch. Only a non-positive qty or
+  // no reference at all is not worth a round trip.
+  return !!ref && qty > 0;
 }
 
 function openDrawer(id) { $(id).classList.add("open"); }
@@ -1045,10 +1051,9 @@ async function boot() {
   $("btn-demand").onclick = async () => {
     const b = $("btn-demand");
     if (b.disabled) return;
-    // Client-side preview of a check the backend enforces anyway (total
-    // READY stock for the ref must cover qty or nothing is reserved at
-    // all, contract 1.2/1.9) -- this only saves a round trip; it never
-    // decides anything the backend doesn't.
+    // Only refuses an empty/non-positive request client-side; over-stock
+    // demands go through so the backend can answer IMPOSSIBLE (with ETA)
+    // or open a production batch (contract 1.10).
     if (!updateDemandHint()) return;
     b.disabled = true;
     try {

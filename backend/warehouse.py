@@ -673,6 +673,22 @@ def recount_box(con, now_sim: float, box_id: str, gross_g: float,
                 "box %s has no known, valid barcode to recount against" % box_id,
                 code=409)
 
+        # A box the vision station already saw holding a DIFFERENT reference
+        # than its barcode declares cannot be cleared by a re-weigh alone:
+        # weight never checks identity, and a wrong-reference crate can land
+        # on a clean multiple of the declared mass for some quantities
+        # (finding, contract 1.10: the dashboard's weight-only re-weigh
+        # re-admitted 65% of vision-caught mismatches at qty 37). It needs a
+        # fresh vision reading that now agrees with the barcode.
+        if vision is None and b["vision_ref"] and b["vision_ref"] != bc["ref"]:
+            reason = ("vision : ref. %s detectee a la reception, code-barre %s annonce %s"
+                      " -- relecture vision requise"
+                      % (b["vision_ref"], bc["barcode_id"], bc["ref"]))
+            DB.update(con, "boxes", "box_id", box_id, {"gross_g": gross_g, "reason": reason})
+            DB.log_event(con, now_sim, "box_recount", {
+                "box_id": box_id, "accepted": False, "reason": reason})
+            return {"ok": True, "accepted": False, "box_id": box_id, "reason": reason}
+
         art = DB.one(con, "SELECT * FROM articles WHERE ref=?", (bc["ref"],))
         vision_ref = vision_confidence = vision_count = None
         if vision:
@@ -685,13 +701,17 @@ def recount_box(con, now_sim: float, box_id: str, gross_g: float,
         verdict = E.assess_box(bc, art, gross_g, vision_ref=vision_ref,
                                vision_count=vision_count,
                                vision_confidence=vision_confidence)
+        # With no fresh camera reading, keep the arrival's own vision evidence
+        # on the row instead of erasing it.
+        kept_vref = verdict.get("vision_ref") if vision else b["vision_ref"]
+        kept_idconf = verdict.get("id_confidence") if vision else b["id_confidence"]
 
         if not verdict["accepted"]:
             DB.update(con, "boxes", "box_id", box_id, {
                 "gross_g": gross_g, "reason": verdict["reason"],
                 "count_weight": verdict["count_weight"],
-                "vision_ref": verdict.get("vision_ref"),
-                "id_confidence": verdict.get("id_confidence")})
+                "vision_ref": kept_vref,
+                "id_confidence": kept_idconf})
             DB.log_event(con, now_sim, "box_recount", {
                 "box_id": box_id, "accepted": False, "reason": verdict["reason"]})
             return {"ok": True, "accepted": False, "box_id": box_id,
@@ -715,8 +735,8 @@ def recount_box(con, now_sim: float, box_id: str, gross_g: float,
             "ready_at_sim": now_sim + req_h * 3600.0,
             "count_weight": verdict["count_weight"], "gross_g": gross_g,
             "confidence": verdict["confidence"], "reason": None,
-            "vision_ref": verdict.get("vision_ref"),
-            "id_confidence": verdict.get("id_confidence")})
+            "vision_ref": kept_vref,
+            "id_confidence": kept_idconf})
         DB.log_event(con, now_sim, "box_recount", {
             "box_id": box_id, "accepted": True, "ref": bc["ref"],
             "qty": verdict["quantity"], "slot": slot["slot_id"]})

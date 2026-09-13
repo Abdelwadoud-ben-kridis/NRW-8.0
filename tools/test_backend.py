@@ -615,6 +615,34 @@ def test_recount_box_accepts_a_good_reweigh():
         cleanup(con)
 
 
+def test_recount_cannot_clear_a_vision_mismatch_by_weight_alone():
+    # contract 1.10: vision saw NY-075 cores in a crate labelled NY-114. A
+    # re-weigh with no fresh camera reading must NOT re-admit it, even when
+    # the weight happens to land on a clean multiple of 206 g -- only a new
+    # vision reading that agrees with the barcode can.
+    con = fresh_con()
+    try:
+        bc = _bc(con)
+        wrong_shape = {"len_mm": 65.0, "wid_mm": 45.0, "h_mm": 30.0, "holes": 1,
+                       "count_visible": 16}
+        clean_gross = C.TARE_G + 16 * 206.0
+        bad = W.create_box(con, 0.0, bc, clean_gross, "test", vision=wrong_shape)
+        check("vision mismatch quarantined", bad["state"] == "QUARANTINE", bad)
+        out = W.recount_box(con, 1.0, bad["box_id"], clean_gross)
+        check("weight-only recount refused", out["accepted"] is False, out)
+        row = DB.one(con, "SELECT * FROM boxes WHERE box_id=?", (bad["box_id"],))
+        check("still QUARANTINE", row["state"] == "QUARANTINE")
+        check("arrival vision evidence kept", row["vision_ref"] == "NY-075", row["vision_ref"])
+        right_shape = {"len_mm": 120.0, "wid_mm": 85.0, "h_mm": 50.0, "holes": 2,
+                       "count_visible": 16}
+        out2 = W.recount_box(con, 2.0, bad["box_id"], clean_gross, vision=right_shape)
+        check("recount with an agreeing fresh vision reading accepted",
+             out2["accepted"] is True, out2)
+        assert_pass(con, 2.0, "vision-mismatch recount")
+    finally:
+        cleanup(con)
+
+
 def test_recount_box_refuses_without_a_known_barcode():
     con = fresh_con()
     try:

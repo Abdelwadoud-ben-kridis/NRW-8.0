@@ -31,7 +31,7 @@ export const EN = {
   noOrder: "No order yet. Ask production for cores.",
   shortfall: "Shortfall", allocated: "Allocated", requested: "Requested",
   demandAvail: (n) => `${n} in stock`,
-  demandTooMuch: (n) => `Only ${n} in stock for this reference — cannot request more.`,
+  demandTooMuch: (n) => `Only ${n} ready for this reference — the system will explain the refusal, or open a production batch.`,
   warehouse: "Warehouse",
   pendingOrders: "Ready to pick up", lockExpiresIn: (s) => `expires in ${s} s`,
   pickupBtn: (qty) => `Confirm — pick up ${qty}`,
@@ -161,6 +161,8 @@ export const EN = {
   detReusedBarcode: (id) => `barcode already used by ${id}`,
   detVisionMismatch: (seen, code, declared) =>
     `vision sees reference ${seen}, but barcode ${code} declares ${declared}`,
+  detVisionRecount: (seen, code, declared) =>
+    `vision saw reference ${seen} at arrival (barcode ${code} declares ${declared}) — a re-weigh can't clear that; a fresh vision reading is required`,
   detCountGap: (weight, vision) =>
     `count disagreement: scale says ${weight}, vision sees ${vision} cores`,
   partialPick: "partial", partialPickHint: "remainder stays in stock, same age",
@@ -199,7 +201,7 @@ export const FR = {
   noOrder: "Aucune commande. Exprimez un besoin de production.",
   shortfall: "Manquant", allocated: "Alloué", requested: "Demandé",
   demandAvail: (n) => `${n} en stock`,
-  demandTooMuch: (n) => `Seulement ${n} en stock pour cette référence — impossible de demander plus.`,
+  demandTooMuch: (n) => `Seulement ${n} prêts pour cette référence — le système expliquera le refus, ou ouvrira un lot de production.`,
   warehouse: "Entrepôt",
   pendingOrders: "Prêt à prélever",
   pickupBtn: (qty) => `Valider — prélever ${qty}`,
@@ -326,6 +328,8 @@ export const FR = {
   detReusedBarcode: (id) => `code-barre déjà utilisé par ${id}`,
   detVisionMismatch: (seen, code, declared) =>
     `la vision détecte la référence ${seen}, mais le code-barre ${code} annonce ${declared}`,
+  detVisionRecount: (seen, code, declared) =>
+    `la vision a détecté la référence ${seen} à la réception (le code-barre ${code} annonce ${declared}) — une repesée ne suffit pas, une nouvelle lecture vision est requise`,
   detCountGap: (weight, vision) =>
     `écart de comptage : pesée ${weight}, vision ${vision} noyaux`,
   partialPick: "partiel", partialPickHint: "le reste reste en stock, même ancienneté",
