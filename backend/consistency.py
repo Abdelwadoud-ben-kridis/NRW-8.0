@@ -297,6 +297,17 @@ def run_checks(con, now_sim: float | None = None) -> dict:
                        "every order references a known article" if not unknown_ref else
                        "%d orders reference an unknown article" % len(unknown_ref), unknown_ref))
 
+    # --- O6: payload.status mirrors the status column (docs/contracts.md §5)
+    # contract 1.10 finding: cancelling a production batch updated the column
+    # but left payload.status at IN_PRODUCTION.
+    stale_payload = [o["order_id"] for o in orders
+                    if json.loads(o["payload"]).get("status") != o["status"]]
+    checks.append(_row("O6", "PASS" if not stale_payload else "FAIL",
+                       "every order's payload.status matches its status column"
+                       if not stale_payload else
+                       "%d orders have a stale payload.status" % len(stale_payload),
+                       stale_payload))
+
     # --- E1/E2: event log shape -----------------------------------------------
     events = DB.rows(con, "SELECT * FROM events")
     bad_json = []

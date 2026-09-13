@@ -690,6 +690,19 @@ async def api_clock(body: dict):
     return {"t_sim": clock.t_sim, "speed": clock.speed}
 
 
+def _parse_qty(body: dict) -> int | None:
+    """qty for a simulated arrival: an integer in [0, 500], default 37. A
+    non-numeric value used to raise straight through to a 500."""
+    raw = body.get("qty", 37)
+    if isinstance(raw, bool):
+        return None
+    try:
+        qty = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return qty if 0 <= qty <= 500 else None
+
+
 @app.post("/api/sim/arrival")
 async def api_arrival(body: dict):
     """The demo's main button: a registered box lands on the conveyor,
@@ -707,8 +720,12 @@ async def api_arrival(body: dict):
     stock.
     """
     barcode_id = body.get("barcode_id")
-    qty = int(body.get("qty", 37))
+    qty = _parse_qty(body)
+    if qty is None:
+        return JSONResponse({"error": "qty must be an integer in [0, 500]"}, 400)
     anomaly = body.get("anomaly", "none")
+    if anomaly not in PLANT.ANOMALIES:
+        return JSONResponse({"error": "unknown anomaly: %s" % anomaly}, 400)
     batch_id = body.get("batch_order_id")
     if batch_id:
         order = DB.one(con, "SELECT status FROM orders WHERE order_id=?", (batch_id,))
@@ -736,7 +753,9 @@ async def api_sim_box(body: dict):
     tagging, as /api/sim/arrival.
     """
     barcode_id = body.get("barcode_id")
-    qty = int(body.get("qty", 37))
+    qty = _parse_qty(body)
+    if qty is None:
+        return JSONResponse({"error": "qty must be an integer in [0, 500]"}, 400)
     batch_id = body.get("batch_order_id")
     if batch_id:
         order = DB.one(con, "SELECT status FROM orders WHERE order_id=?", (batch_id,))
@@ -803,7 +822,10 @@ async def api_demand(body: dict):
     if qty <= 0:
         return JSONResponse({"error": "qty must be > 0"}, 400)
 
-    plan = W.reserve(con, clock.t_sim, ref, qty)
+    try:
+        plan = W.reserve(con, clock.t_sim, ref, qty)
+    except W.OpError as e:
+        return JSONResponse({"error": e.message}, e.code)
     STATE["last_order"] = plan
     # The crane doesn't move on a reservation -- it's a soft hold on stock,
     # not a physical action yet. It moves on confirm (below), so clicking
@@ -1059,8 +1081,20 @@ async def on_start():
     asyncio.create_task(loop_clock())
     asyncio.create_task(loop_ws())
     asyncio.create_task(loop_mqtt_in())
-    print("[scw] dashboard on http://localhost:8000   session=%s   contract=%s"
-         % (C.SESSION, C.CONTRACT_VERSION))
+    print("[scw] dashboard on http://localhost:%s   session=%s   contract=%s"
+         % (_listen_port(), C.SESSION, C.CONTRACT_VERSION))
+
+
+def _listen_port() -> str:
+    """The port uvicorn was actually started on (`--port N` / `--port=N`),
+    for the startup banner only -- it used to always print 8000."""
+    argv = sys.argv
+    for i, a in enumerate(argv):
+        if a == "--port" and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith("--port="):
+            return a.split("=", 1)[1]
+    return os.environ.get("SCW_PORT", "8000")
 
 
 if __name__ == "__main__":

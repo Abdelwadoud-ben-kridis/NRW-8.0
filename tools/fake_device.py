@@ -3,17 +3,24 @@ tools/fake_device.py — a Python stand-in for the ESP32.
 
     python tools/fake_device.py
 
-It subscribes to the SAME raw topic, runs the SAME measurement chain (tare,
-debounce, stability, edge counting) and publishes BYTE-IDENTICAL telemetry and
-box_done messages. The backend cannot tell it apart from the real board.
+It subscribes to the SAME raw topic, runs the SAME measurement chain as
+firmware/sketch.ino (tare, stability, `final`-frame shortcut, one box_done
+per box then latch until the next start_box) and publishes the same
+telemetry and box_done payload shapes. The backend cannot tell it apart
+from the real board.
 
 Two uses:
   1. P3 develops the backend and the dashboard without waiting for P4's Wokwi.
-  2. It is fallback level L1 at the demo: if Wokwi drops, start this in a
+  2. It is fallback level L1b at the demo: if Wokwi drops, start this in a
      spare terminal and the screen behaves exactly the same.
 
 Never demo this *as* the embedded system. It exists so the embedded system is
 never on the critical path of anything else.
+
+Keep on_raw() a line-for-line mirror of sketch.ino::onRaw(): contract 1.10
+found the two had drifted (this file reset its stability timer to "now",
+the sketch to 0), which hid the sketch publishing box_done twice per box
+from tools/l0_probe.py.
 """
 from __future__ import annotations
 
@@ -27,35 +34,38 @@ from backend import config as C
 
 import paho.mqtt.client as mqtt
 
-STABLE_S = 1.2
-STABLE_S_FINAL = 0.25    # shorter wait once the conveyor said "final" (contract 1.7)
+STABLE_S = 2.5           # fallback only -- sketch.ino STABLE_MS
+STABLE_S_FINAL = 0.25    # once the conveyor said "final" -- sketch.ino STABLE_MS_FINAL
 STABLE_BAND_G = 25.0
 
 
 class FakeEsp32:
     def __init__(self) -> None:
-        self.reset()
+        self.last_mass = 0.0      # like g_lastMass: NOT cleared by reset
         self.ref = "NY-114"
+        self.reset()
 
-    def reset(self) -> None:
+    def reset(self) -> None:      # sketch.ino::resetBox()
         self.tare_g = 0.0
         self.gross_g = 0.0
         self.tared = False
+        self.counting = False
         self.stable = False
         self.saw_final = False
-        self.stable_since = time.monotonic()
-        self.last_mass = 0.0
-        self.done_sent = False
+        self.stable_since = 0.0   # like g_stableMs = 0
+        self.done = False
 
-    # --- identical logic to firmware/sketch.ino ---------------------------
+    # --- identical logic to firmware/sketch.ino::onRaw() ------------------
     def on_raw(self, load_mv: float, final: bool, client) -> None:
+        if self.done:
+            return
         now = time.monotonic()
         mass = load_mv * C.G_PER_MV
 
         if not self.tared:
             if abs(mass - self.last_mass) < STABLE_BAND_G:
                 if now - self.stable_since > 0.4:
-                    self.tare_g, self.tared = mass, True
+                    self.tare_g, self.tared, self.counting = mass, True, True
                     print("[tare] %.0f g" % self.tare_g)
             else:
                 self.stable_since = now
@@ -66,11 +76,6 @@ class FakeEsp32:
         if final:
             self.saw_final = True
 
-        # Weight is the only sensor (contract 1.5/1.7 -- identification and
-        # the second count come from a barcode scan and a simulated vision
-        # station upstream of this stand-in). `final` (from the plant
-        # model's last raw frame) shortens the settle wait instead of
-        # relying purely on a timeout that ordinary MQTT jitter could clip.
         need = STABLE_S_FINAL if self.saw_final else STABLE_S
         if abs(mass - self.last_mass) > STABLE_BAND_G:
             self.stable_since = now
@@ -81,20 +86,19 @@ class FakeEsp32:
                 self.publish_done(client)
         self.last_mass = mass
 
-    def publish_done(self, client) -> None:
-        if self.done_sent:
-            return
-        self.done_sent = True
+    def publish_done(self, client) -> None:   # sketch.ino::publishBoxDone()
         payload = {"ref": self.ref, "gross_g": round(self.gross_g, 1),
-                   "fw": "fake-1.2"}
+                   "fw": "fake-1.3"}
         client.publish(C.T_BOX_DONE, json.dumps(payload))
         print("[box_done] %s" % payload)
-        self.reset()
+        self.done, self.counting, self.stable = True, False, True
 
     def telemetry(self) -> str:
+        state = ("DONE" if self.done else
+                 ("STABILIZING" if self.stable else "COUNTING") if self.counting
+                 else "IDLE")
         return json.dumps({
-            "state": ("STABILIZING" if self.stable else
-                      "COUNTING" if self.tared else "IDLE"),
+            "state": state,
             "gross_g": round(self.gross_g, 1),
             "stable": self.stable,
             "up_ms": int(time.monotonic() * 1000), "src": "fake"})

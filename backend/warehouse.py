@@ -255,6 +255,10 @@ def reserve(con, now_sim: float, ref: str, qty: int) -> dict:
     tagged from birth and shipped together once every one of them has left
     DRYING -- see confirm()/_ship_batch.
     """
+    if not DB.one(con, "SELECT 1 FROM articles WHERE ref=?", (ref,)):
+        # contract 1.10: an unknown reference is a bad request, not a
+        # production batch for a part nobody can make (it used to open one).
+        raise OpError("reference inconnue: %s" % ref, code=400)
     with DB.transaction(con):
         # settle any box that crossed its 24 h floor since loop_clock's last
         # 0.2 s tick, so the CAS below (which expects state="READY") agrees
@@ -523,7 +527,10 @@ def cancel(con, now_sim: float, order_id: str) -> dict:
             boxes = DB.rows(con, "SELECT box_id FROM boxes WHERE batch_id=?", (order_id,))
             for b in boxes:
                 DB.update(con, "boxes", "box_id", b["box_id"], {"batch_id": None})
-            con.execute("UPDATE orders SET status='CANCELLED' WHERE order_id=?", (order_id,))
+            plan = json.loads(row["payload"])
+            plan["status"] = "CANCELLED"          # payload.status == status, always
+            con.execute("UPDATE orders SET status='CANCELLED', payload=? WHERE order_id=?",
+                        (json.dumps(plan, ensure_ascii=False), order_id))
             released = [b["box_id"] for b in boxes]
             DB.log_event(con, now_sim, "batch_cancelled",
                         {"order_id": order_id, "released_to_stock": released})
@@ -848,7 +855,7 @@ def load_demo_scenario(con) -> dict:
                 "box_id": b["box_id"], "ready_at_sim": b["ready_at_sim"],
                 "after_h": round(b["required_cure_h"], 1)})
         DB.meta_set(con, "t_sim", _SCENARIO_FINAL_SIM)
-        DB.meta_set(con, "speed", C.DEFAULT_SPEED)
+        DB.meta_set(con, "speed", C.SCENARIO_SPEED)
         DB.log_event(con, _SCENARIO_FINAL_SIM, "scenario_loaded",
                     {"name": "demo", "t_sim": _SCENARIO_FINAL_SIM})
-        return {"t_sim": _SCENARIO_FINAL_SIM, "speed": C.DEFAULT_SPEED}
+        return {"t_sim": _SCENARIO_FINAL_SIM, "speed": C.SCENARIO_SPEED}

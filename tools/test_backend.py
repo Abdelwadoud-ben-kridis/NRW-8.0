@@ -14,6 +14,7 @@ algo/test_engine.py only covers the pure decision functions in isolation.
 from __future__ import annotations
 
 import itertools
+import json
 import os
 import sys
 import tempfile
@@ -334,6 +335,8 @@ def test_scenario_loads_and_checks_pass():
     try:
         result = W.load_demo_scenario(con)
         check("scenario final t_sim is 34h", result["t_sim"] == 34.0 * 3600.0)
+        check("scenario clock starts at x1 (contract 1.10)", result["speed"] == 1.0,
+             result["speed"])
         boxes = DB.rows(con, "SELECT * FROM boxes")
         check("six boxes", len(boxes) == 6, len(boxes))
         ready = sum(1 for b in boxes if b["state"] == "READY")
@@ -495,6 +498,8 @@ def test_cancelling_a_batch_releases_its_boxes_to_general_stock():
         check("box otherwise untouched (still DRYING)", row["state"] == "DRYING")
         order_row = DB.one(con, "SELECT * FROM orders WHERE order_id=?", (order_id,))
         check("order is CANCELLED", order_row["status"] == "CANCELLED")
+        check("batch payload.status is CANCELLED too (contract 1.10)",
+             json.loads(order_row["payload"])["status"] == "CANCELLED")
 
         DB.update(con, "boxes", "box_id", box["box_id"], {"state": "READY"})
         plan2 = W.reserve(con, 100 * H, "NY-114", 30)
@@ -652,6 +657,22 @@ def test_recount_box_refuses_without_a_known_barcode():
             check("recount without a real barcode raises", False)
         except W.OpError as e:
             check("recount without a real barcode raises", e.code == 409)
+    finally:
+        cleanup(con)
+
+
+def test_unknown_reference_demand_is_refused_not_a_batch():
+    # contract 1.10: an unknown ref used to open an IN_PRODUCTION batch.
+    con = fresh_con()
+    try:
+        try:
+            W.reserve(con, 0.0, "NOPE-999", 5)
+            check("unknown-ref demand raises", False)
+        except W.OpError as e:
+            check("unknown-ref demand raises a 400", e.code == 400, e.message)
+        check("no order row written",
+             con.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 0)
+        assert_pass(con, 0.0, "unknown-ref demand")
     finally:
         cleanup(con)
 

@@ -102,6 +102,28 @@ check("onRaw() reads the `final` field off the raw frame",
 check("a shorter STABLE_MS_FINAL exists for once `final` has arrived",
      "STABLE_MS_FINAL" in sketch)
 
+# The fallback timeout must be longer than the plant model's settle window
+# (backend/plant.py::build_arrival pushes 14 settle frames at RAW_HZ), or it
+# fires before `final` ever arrives (contract 1.10 finding).
+settle_ms = 14 * 1000.0 / C.RAW_HZ
+stable_ms = find(r"STABLE_MS\s*=\s*(\d+)\s*;", sketch, "STABLE_MS")
+if stable_ms:
+    check("STABLE_MS (%s) is longer than the %.0f ms settle window" % (stable_ms, settle_ms),
+         int(stable_ms) > settle_ms + 500)
+
+# One box -> one box_done (contract 1.10): publishBoxDone latches instead of
+# resetting the tare mid-arrival, and onRaw ignores frames once latched.
+check("publishBoxDone() latches g_done instead of calling resetBox()",
+     "g_done = true" in body and "resetBox()" not in body)
+check("onRaw() returns early once the box is reported",
+     re.search(r"void onRaw\([^)]*\)\s*\{\s*if \(g_done\) return;", sketch) is not None)
+check("the activity LED is switched off again", "digitalWrite(PIN_LED, LOW)" in sketch)
+
+fake = open(os.path.join(ROOT, "tools", "fake_device.py"), encoding="utf-8").read()
+fake_stable = re.search(r"STABLE_S\s*=\s*([\d.]+)", fake)
+check("tools/fake_device.py STABLE_S matches sketch.ino STABLE_MS",
+     bool(fake_stable and stable_ms) and abs(float(fake_stable.group(1)) * 1000 - int(stable_ms)) < 1)
+
 # --- 4. wiring matches the judging requirement (real, legible pins) --------
 required_pins = {"PIN_DONE": "26", "PIN_POT": "34", "PIN_LED": "2"}
 for name, pin in required_pins.items():

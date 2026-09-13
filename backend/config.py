@@ -5,7 +5,7 @@ import os
 # CHANGE THIS in the first 10 minutes at INSAT so you don't collide with
 # another team on the same public broker. It must match SESSION in
 # firmware/sketch.ino EXACTLY.
-SESSION = os.environ.get("SCW_SESSION", "nrw8")
+SESSION = os.environ.get("SCW_SESSION", "nrw8-scw-k7q2")
 
 MQTT_HOST = os.environ.get("SCW_MQTT_HOST", "broker.hivemq.com")
 MQTT_PORT = int(os.environ.get("SCW_MQTT_PORT", "1883"))
@@ -42,6 +42,12 @@ WS_HZ = 5.0
 RAW_HZ = 10.0
 MAX_JUMP_H = 48.0                # /api/clock jump_h is clamped to (0, MAX_JUMP_H]
 ALLOWED_SPEEDS = (0.0, 1.0, 60.0, 3600.0)
+# The rehearsed demo scenario (S hotkey) starts the clock at x1, not x60
+# (contract 1.10): at x60 the scripted numbers drifted within minutes (BOX-4
+# cured 1 real minute after S, BOX-5 after 9), and a reservation's 2 sim-h
+# lock expired after 2 real minutes. The clock still visibly ticks; use J
+# (+6 h) to cross the 24 h threshold on demand.
+SCENARIO_SPEED = 1.0
 
 # --- storage ----------------------------------------------------------------
 DB_PATH = os.environ.get("SCW_DB", os.path.join(

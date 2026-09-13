@@ -19,7 +19,15 @@
  * the original 1.2 s timeout against a ~1.4 s settle window in the plant
  * model had no margin at all). The timeout stays as a fallback for when no
  * `final` frame ever arrives (a real conveyor limit switch failing, or a
- * dropped last frame), just widened for real safety margin.
+ * dropped last frame), widened to 2.5 s so it can never fire inside the
+ * plant model's 1.4 s settle window.
+ *
+ * One box, one box_done (contract 1.10): once a box is reported the board
+ * latches DONE and ignores raw frames until the next start_box/reset.
+ * Before this, publishBoxDone() reset the tare mid-arrival, the board
+ * re-tared on the last few settle frames and published a SECOND box_done
+ * for every arrival (the backend's dedup swallowed it, but the event log
+ * showed a "duplicate ignored" per box, and the LED never went off).
  *
  * Local overrides (the physical demo prop, standalone rig only -- disabled
  * while a raw-MQTT-driven arrival is being counted, so a stray press never
@@ -51,7 +59,7 @@
 #include <Adafruit_SSD1306.h>
 
 // ---------- MUST MATCH backend/config.py -----------------------------------
-#define SESSION   "nrw8"
+#define SESSION   "nrw8-scw-k7q2"
 #define MQTT_HOST "broker.hivemq.com"
 #define MQTT_PORT 1883
 
@@ -87,13 +95,16 @@ bool     g_tared    = false;
 bool     g_counting = false;
 bool     g_stable   = false;
 bool     g_sawFinal = false;          // conveyor said "crate has left the station"
+bool     g_done     = false;          // this box already reported -- ignore raw
+                                       // frames until the next start_box/reset
 uint32_t g_stableMs = 0;
 float    g_lastMass = 0;
 
 // Weight is the ONLY sensor on this board (contract 1.5/1.7) -- the second
 // count and the reference identity come from a barcode scan and a simulated
 // vision station upstream, not from anything read here.
-const uint32_t STABLE_MS       = 1200;  // mass unchanged this long = settled
+const uint32_t STABLE_MS       = 2500;  // fallback only: mass unchanged this long
+                                         // = settled (> the 1.4 s settle window)
 const uint32_t STABLE_MS_FINAL = 250;   // shorter wait once `final` arrived --
                                          // just enough to reject a fluke frame
 const float    STABLE_BAND_G   = 25.0;  // +/- noise band on the scale
@@ -102,24 +113,30 @@ const float    STABLE_BAND_G   = 25.0;  // +/- noise band on the scale
 void resetBox() {
   g_gross_g = 0; g_tare_g = 0; g_tared = false;
   g_counting = false; g_stable = false; g_sawFinal = false; g_stableMs = 0;
+  g_done = false;
+  digitalWrite(PIN_LED, LOW);
 }
 
 void publishBoxDone() {
   StaticJsonDocument<256> d;
   d["ref"]        = g_ref;
   d["gross_g"]    = g_gross_g;
-  d["fw"]         = "1.2";
+  d["fw"]         = "1.3";
   char buf[256];
   serializeJson(d, buf);
   mqtt.publish(T_BOX_DONE, buf);
   Serial.printf("[box_done] %s gross=%.0f g\n", g_ref.c_str(), g_gross_g);
-  resetBox();
+  // Latch, don't reset: resetting here re-tared on the remaining settle
+  // frames and published a second box_done for the same physical box.
+  g_done = true; g_counting = false; g_stable = true;
+  digitalWrite(PIN_LED, LOW);
 }
 
 // --- OLED: pure display, reads board state, never feeds a decision --------
 void updateDisplay() {
   if (!g_oledOk) return;
-  const char* state = !g_tared ? "TARE..." : (g_stable ? "STABLE" : "WEIGHING");
+  const char* state = g_done ? "DONE" :
+                      (!g_tared ? "TARE..." : (g_stable ? "STABLE" : "WEIGHING"));
   oled.clearDisplay();
   oled.setTextSize(1);
   oled.setTextColor(SSD1306_WHITE);
@@ -143,7 +160,8 @@ void updateDisplay() {
 
 void publishTelemetry() {
   StaticJsonDocument<256> d;
-  d["state"]      = g_counting ? (g_stable ? "STABILIZING" : "COUNTING") : "IDLE";
+  d["state"]      = g_done ? "DONE" :
+                    (g_counting ? (g_stable ? "STABILIZING" : "COUNTING") : "IDLE");
   d["gross_g"]    = g_gross_g;
   d["stable"]     = g_stable;
   d["up_ms"]      = millis();
@@ -155,6 +173,7 @@ void publishTelemetry() {
 
 // --- the whole measurement chain, on the board -----------------------------
 void onRaw(float load_mv, bool final_frame) {
+  if (g_done) return;                 // box already reported (contract 1.10)
   float mass = load_mv * G_PER_MV;
 
   // 1. TARE: the first stable reading is the empty crate
