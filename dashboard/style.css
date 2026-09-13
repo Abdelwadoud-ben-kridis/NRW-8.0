@@ -97,8 +97,13 @@ body.gut-dragging-h{cursor:row-resize!important;user-select:none}
    PER-WIDGET RESIZE — every card in the left column, and every
    labelled block in the right column, gets its own drag corner.
    ============================================================ */
-.card{resize:vertical;overflow:auto;min-height:60px}
-.rsec{resize:vertical;overflow:auto;min-height:44px;max-height:70vh}
+/* flex-shrink:0 matters here: overflow:auto resets a flex item's automatic
+   min-height to 0 (spec), so without it #left/#right's column flex would
+   silently squash every card/rsec down toward min-height instead of
+   sizing to content -- resize should only ever shrink a box because the
+   user dragged it smaller, never on its own. */
+.card{resize:vertical;overflow:auto;min-height:60px;flex-shrink:0}
+.rsec{resize:vertical;overflow:auto;min-height:44px;max-height:70vh;flex-shrink:0}
 
 /* ============================================================
    TOP APPLICATION BAR
