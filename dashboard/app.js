@@ -93,6 +93,7 @@ function paintLabels() {
   $("l-dref").textContent = L.article;
   $("l-dqty").textContent = L.qty;
   $("btn-demand").innerHTML = L.ask + hk("D");
+  $("btn-demand-oldest").textContent = L.askOldest;
   $("btn-confirm").innerHTML = L.confirm + hk("C");
   $("btn-cancel").textContent = L.cancel;
 
@@ -1044,15 +1045,25 @@ async function boot() {
   $("btn-demand").onclick = async () => {
     const b = $("btn-demand");
     if (b.disabled) return;
-    // Client-side preview of a check the backend enforces anyway
-    // (fifo_allocate refuses to split a box, contract 1.3) -- this only
-    // saves a round trip; it never decides anything the backend doesn't.
+    // Client-side preview of a check the backend enforces anyway (total
+    // READY stock for the ref must cover qty or nothing is reserved at
+    // all, contract 1.2/1.9) -- this only saves a round trip; it never
+    // decides anything the backend doesn't.
     if (!updateDemandHint()) return;
     b.disabled = true;
     try {
       await api("/demand", { ref: $("dref").value, qty: +$("dqty").value });
       renderLog();
     } finally { b.disabled = false; }
+  };
+  $("btn-demand-oldest").onclick = async () => {
+    const b = $("btn-demand-oldest");
+    if (b.disabled) return;
+    b.disabled = true;
+    // api() already surfaces a {"error": ...} response (e.g. no ready
+    // boxes at all) on the banner -- nothing extra to do here.
+    try { await api("/demand/oldest", {}); renderLog(); }
+    finally { b.disabled = false; }
   };
   guardedOrderOp($("btn-confirm"), () => ST?.last_order &&
     api("/demand/confirm", { order_id: ST.last_order.order_id }).then(renderLog));

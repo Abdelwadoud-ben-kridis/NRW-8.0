@@ -2,9 +2,13 @@
 tools/mqtt_probe.py — MQTT-layer chaos probe for backend/main.py's
 loop_mqtt_in and the arrival-window dedup logic (algo.engine.dedup_verdict).
 
-    python tools/mqtt_probe.py            (backend must be running on :8000,
-                                            and reachable on the same MQTT
-                                            session -- see backend/config.py)
+    python tools/mqtt_probe.py            (backend must be running, default
+                                            :8000, and reachable on the same
+                                            MQTT session -- see backend/config.py)
+
+This calls /api/reset -- point it at an isolated instance (SCW_DB/
+SCW_SESSION on that server), matching SCW_SESSION/SCW_BASE here:
+    SCW_SESSION=nrw8-test SCW_BASE=http://localhost:8793 python tools/mqtt_probe.py
 
 Unlike tools/smoke.py (REST only) and tools/test_backend.py (DB layer only),
 this publishes directly onto the MQTT topics the ESP32/fake_device use, so it
@@ -37,7 +41,7 @@ except ImportError:
 
 from backend import config as C
 
-BASE = "http://localhost:8000"
+BASE = os.environ.get("SCW_BASE", "http://localhost:8000")
 fails = []
 
 

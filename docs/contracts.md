@@ -3,7 +3,36 @@
 Owner: **P3 (dashboard / backend / site)**. Everyone codes against this file.
 If you change it, announce it out loud and bump the version line.
 
-    CONTRACT VERSION: 1.8
+    CONTRACT VERSION: 1.9
+
+Changes from 1.8 (whole-box-only allocation again, and a reference-free
+"take the oldest ready box" convenience, 2026-09-13):
+
+- **FIFO picks are WHOLE-BOX-ONLY again, reversing 1.7's partial picks.**
+  `algo/engine.py::fifo_allocate` now always takes a candidate box's
+  entire `qty_available` — never a partial amount — so `qty_allocated`
+  can overshoot `qty_requested` up to the next whole box instead of
+  landing on it exactly. `picks[].partial` is always `false`; confirming
+  an order always empties every box it reserved (`apply_pick`'s partial
+  branch is unchanged but no longer reachable from `fifo_allocate`, same
+  as it was before 1.7). Nothing else about contract 1.7 changed — vision
+  cross-check, batch stock protection, and quarantine recovery are all
+  still exactly as they were.
+- **New `POST /api/demand/oldest`**: a convenience that skips picking a
+  reference entirely — it reserves whichever `READY`, non-batch box (any
+  reference) has been sitting longest, whole, by calling `W.reserve()`
+  with that box's own `ref`/`qty_available`. Same audited FIFO path as an
+  ordinary demand, not a separate code path; `{"error":"no ready boxes"}`
+  (404) when nothing qualifies.
+- Every place that documented or tested partial-pick behavior (`docs/
+  contracts.md` itself, `docs/database-guide.md`, `README.md`,
+  `algo/test_engine.py`, `tools/test_backend.py`, `tools/smoke.py`) was
+  updated to whole-box-only expectations.
+- `tools/smoke.py`, `tools/mqtt_probe.py`, and `tools/l0_probe.py` now
+  read their target server's base URL from `SCW_BASE` (default unchanged:
+  `http://localhost:8000`) instead of a hardcoded constant — they call
+  `/api/reset` repeatedly and previously had no way to point away from
+  whatever happened to be running on :8000.
 
 Changes from 1.7 (remove the DHT22 / curing-room-climate feature entirely,
 2026-09-13):
@@ -417,6 +446,7 @@ it never crashes the MQTT listener, and telemetry/curing keep running.
 | GET    | `/api/barcodes?unused=true` | –                                 | `[{"barcode_id","ref","unit_mass_g","registered_sim","used_by_box"}]` |
 | POST   | `/api/sim/arrival`    | `{"barcode_id":"BC-1042","qty":37,"anomaly":"none"}` or `{"ref":"NY-114",...}` (auto-registers a throwaway barcode) — optional `"batch_order_id":"ORD-3"` tags the resulting box to that production batch | plays the plant model at 10 Hz, then L0/L1 as in §0 — this is the **A** hotkey |
 | POST   | `/api/demand`         | `{"ref":"NY-114","qty":40}`            | allocation plan (§4) — `status` is `"PENDING"` (FIFO fully covered it), `"IN_PRODUCTION"` (opened a batch for the shortfall), or `"IMPOSSIBLE"` (nothing allocated, ref unknown or a demand of 0/negative); or `{"error":...}` (400: missing/invalid `ref`/`qty`) |
+| POST   | `/api/demand/oldest`  | – (no body)                            | contract 1.9: skip picking a reference — reserves whichever `READY`, non-batch box (any reference) has the oldest `t_in_sim`, whole. Same allocation plan shape as `/api/demand`, `qty_requested` set to that box's own `qty_available` so it never overshoots itself; or `{"error":"no ready boxes"}` (404) |
 | POST   | `/api/demand/confirm` | `{"order_id":"ORD-3"}`                 | PENDING: `{"ok":true,"already":false,"qty_allocated":N}`. IN_PRODUCTION: ships every READY box tagged to the batch — `{"ok":true,"already":false,"qty_allocated":N,"target":M,"short":bool}`, or a 409 naming which boxes are still curing. Confirming an already-DONE order returns `{"ok":true,"already":true}`; confirming a CANCELLED/IMPOSSIBLE/unknown order is `{"error":...}` (409/404) |
 | POST   | `/api/demand/cancel`  | `{"order_id":"ORD-3"}`                 | PENDING: releases its picks back to READY. IN_PRODUCTION: clears `batch_id` on its boxes, returning them to general stock. Both: `{"ok":true,"already":false,"released":[box_id,...]}` — cancelling an already-CANCELLED order returns `{"ok":true,"already":true}`; cancelling a DONE/IMPOSSIBLE/unknown order is `{"error":...}` (409/404) |
 | POST   | `/api/sim/raw`        | `{"beam":0,"load_mv":1843}`            | `{ok:true}` — plant model → MQTT |
@@ -541,13 +571,13 @@ Client → server (rare; most client actions go through REST):
 {
   "order_id": "ORD-3",
   "ref": "NY-114",
-  "qty_requested": 40,
+  "qty_requested": 35,
   "qty_allocated": 40,
   "shortfall": 0,
   "eta_sim": null,
   "picks": [
     {"box_id":"BOX-4","slot_id":"F0-C1-L2","take":22,"t_in_sim":3600.0,"rank":1,"partial":false},
-    {"box_id":"BOX-9","slot_id":"F1-C5-L9","take":18,"t_in_sim":9000.0,"rank":2,"partial":true}
+    {"box_id":"BOX-9","slot_id":"F1-C5-L9","take":18,"t_in_sim":9000.0,"rank":2,"partial":false}
   ],
   "rejected": [
     {"box_id":"BOX-7","reason":"sechage insuffisant","detail":"pret dans 4.2 h"},
@@ -560,15 +590,13 @@ Client → server (rare; most client actions go through REST):
 }
 ```
 
-Picks are **partial FIFO** (contract 1.7, reversing 1.3's whole-box-only
-rule): `take` is only what the order still needs from that box once
-earlier picks are counted, so `qty_allocated` lands exactly on
-`qty_requested` whenever the pipeline can cover it — the box carrying the
-last, smaller `take` is marked `"partial": true` and keeps its remainder
-`READY` at its ORIGINAL `t_in_sim`, still first in line for the next
-demand. A box already tagged to another order's production batch
-(`"reserve au lot"`) is excluded from `pickable` entirely — it is not
-general stock (§6 rule 8b).
+Picks are **whole-box-only** (contract 1.9, reversing 1.7's partial
+picks): `take` is always a candidate box's entire `qty_available`, so
+`qty_allocated` can OVERSHOOT `qty_requested` up to the next whole box
+(35 requested, 40 allocated, above) rather than landing on it exactly —
+`picks[].partial` is always `false`. A box already tagged to another
+order's production batch (`"reserve au lot"`) is excluded from `pickable`
+entirely — it is not general stock (§6 rule 8b).
 
 When nothing is pickable (`status: "IMPOSSIBLE"`), `eta_sim` (contract 1.7)
 names the simulated time the curing pipeline ALONE would close the gap
@@ -664,8 +692,9 @@ meta(k PK, v)
 ```
 
 **Persisted states** — what `boxes.state` actually holds:
-`DRYING → READY → RESERVED → (partial → READY, t_in unchanged | full →
-EMPTY) → ARCHIVED`, plus `QUARANTINE` (a box is born directly into
+`DRYING → READY → RESERVED → (cancelled/expired → READY, t_in unchanged |
+confirmed → EMPTY, always the whole box, contract 1.9) → ARCHIVED`, plus
+`QUARANTINE` (a box is born directly into
 `DRYING` or `QUARANTINE`). Contract 1.7 adds two ways out of `QUARANTINE`:
 `POST /api/box/{id}/archive` (`QUARANTINE`/`EMPTY` → `ARCHIVED`, terminal)
 and `POST /api/box/{id}/recount` (`QUARANTINE` → `DRYING` on a successful
@@ -712,10 +741,10 @@ to general stock instead of discarding them.
    `BOX-2` sorts before `BOX-10`. Every place that orders boxes for FIFO
    purposes (allocation, the inventory table, the by-ref FIFO head) uses
    this same key.
-4. `apply_pick` (confirm) supports a partial take in principle and returns
-   the box to `READY` with **`t_in_sim` unchanged** if it ever gets one —
-   re-stamping it would silently break FIFO. In practice this never fires
-   today, because rule 7 means `fifo_allocate` never generates a partial
+4. `apply_pick` (confirm) supports a partial take in principle and would
+   return the box to `READY` with **`t_in_sim` unchanged** if it ever got
+   one — re-stamping it would silently break FIFO. In practice this never
+   fires, because rule 7 means `fifo_allocate` never generates a partial
    take.
 5. `RESERVED` is a real lock with `lock_expires_sim`; expiry releases the
    box **and cancels its order** (`order_expired` event) — a lock running
@@ -725,12 +754,11 @@ to general stock instead of discarding them.
    on an order already in its target state is a no-op; applying either to
    an order in the wrong state is refused (409), never silently applied to
    whatever the boxes happen to be now.
-7. **A pick is partial FIFO** (contract 1.7, reversing 1.3): `take` is only
-   what the demand still needs from that box once earlier picks are
-   counted, so `qty_allocated` lands exactly on `qty_requested` whenever
-   the pipeline can cover it. The box carrying the last, smaller `take` is
-   marked `partial: true` and keeps its remainder `READY` at its ORIGINAL
-   `t_in_sim` — the same FIFO position it already had.
+7. **A pick is WHOLE-BOX-ONLY** (contract 1.9, reversing 1.7's partial
+   picks): `take` is always a candidate box's entire `qty_available` —
+   never split — so `qty_allocated` may OVERSHOOT `qty_requested` up to
+   the next whole box rather than landing on it exactly. `picks[].partial`
+   is always `false`.
 8. **Demand is FIFO-first, make-to-order for the shortfall** (contract
    1.6): if the ref's total pipeline (every non-`QUARANTINE`,
    non-`batch_id` box, curing or reserved included, not just

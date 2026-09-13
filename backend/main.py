@@ -812,6 +812,26 @@ async def api_demand(body: dict):
     return plan
 
 
+@app.post("/api/demand/oldest")
+async def api_demand_oldest():
+    """Convenience: skip picking a reference -- reserve whichever READY box
+    (any reference) has been sitting longest, whole (contract 1.9's
+    whole-box-only allocation already guarantees a demand for exactly that
+    box's own quantity takes the entire box). Reuses W.reserve() with that
+    box's own ref/qty, so it's the same audited FIFO path as a normal
+    demand, not a separate code path. Batch-tagged boxes are excluded --
+    they are not general stock even once READY (see reserve()'s own
+    exclusion for why)."""
+    rows = DB.rows(con, "SELECT * FROM boxes WHERE state='READY' AND batch_id IS NULL")
+    if not rows:
+        return JSONResponse({"error": "no ready boxes"}, 404)
+    oldest = min(rows, key=E.fifo_key)
+    plan = W.reserve(con, clock.t_sim, oldest["article_ref"], oldest["qty_available"])
+    STATE["last_order"] = plan
+    await broadcast()
+    return plan
+
+
 @app.post("/api/demand/confirm")
 async def api_confirm(body: dict):
     oid = body.get("order_id")

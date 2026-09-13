@@ -265,18 +265,30 @@ python tools/l0_probe.py        # proves the LIVE device path (L0), not just
                                  # L1 -- backend must be running
 ```
 
+**`smoke.py`/`mqtt_probe.py`/`l0_probe.py` call `/api/reset` repeatedly --
+they WILL wipe whatever database the target server is using.** They default
+to `http://localhost:8000`; point them at an isolated instance instead of
+your live/demo one with `SCW_BASE` (and match `SCW_SESSION` for the two
+that talk MQTT), the same way the server itself takes `SCW_DB`/`SCW_SESSION`:
+
+```bash
+SCW_DB=/tmp/t.db SCW_SESSION=nrw8-test python -m uvicorn backend.main:app --port 8793 &
+SCW_BASE=http://localhost:8793 python tools/smoke.py
+SCW_BASE=http://localhost:8793 SCW_SESSION=nrw8-test python tools/mqtt_probe.py
+```
+
 `smoke.py` walks the exact demo path: two boxes arrive five simulated hours
 apart, a demand before curing is refused **with reasons**, the clock jumps, the
 boxes cure on their own (always exactly 24 h — contract 1.2, no adaptive
-model), FIFO allocates across two boxes oldest-first, taking only what the
-demand needs and leaving the remainder READY in place (contract 1.7 —
-partial picks, reversing 1.3's whole-box-only rule), the fully-picked box
-releases its slot, an injected mismatch anomaly lands in quarantine
-(caught by the simulated vision station even when the weight alone would
-not have noticed), a double confirm deducts exactly once, an expired
-reservation cancels its order, an unknown reference is quarantined without
-polluting a real article, and the read-only consistency checker
-(`backend/consistency.py`, `GET /api/db/check`) reports `PASS`.
+model), FIFO allocates across two boxes oldest-first, taking each one
+whole even when that overshoots the request (contract 1.9 — whole-box-only,
+reversing 1.7's partial picks), both picked boxes release their slots,
+an injected mismatch anomaly lands in quarantine (caught by the simulated
+vision station even when the weight alone would not have noticed), a
+double confirm deducts exactly once, an expired reservation cancels its
+order, an unknown reference is quarantined without polluting a real
+article, and the read-only consistency checker (`backend/consistency.py`,
+`GET /api/db/check`) reports `PASS`.
 
 `test_backend.py` covers what `smoke.py` cannot reach over REST alone: the
 transactional guarantees in `backend/warehouse.py` (double allocation,
@@ -365,6 +377,8 @@ reverse, because 55 of the 160 points are things the jury has to *see happen*.
 - FIFO is sorted on `(t_in_sim, box_id)`, with `box_id` compared as the
   number it encodes (`BOX-2` before `BOX-10`), so the same demand gives the
   same answer twice — which matters when the jury asks you to run it again.
-  Picks are partial (contract 1.7): a demand takes only what it needs from
-  the oldest box, and the remainder stays first in line, at its own
-  original timestamp, for the next one.
+  Picks are whole-box-only (contract 1.9): a demand always takes an entire
+  box, oldest first, even if that overshoots what was actually asked for
+  rather than splitting one. `POST /api/demand/oldest` skips picking a
+  reference entirely and takes whichever ready box has been sitting
+  longest, any reference.

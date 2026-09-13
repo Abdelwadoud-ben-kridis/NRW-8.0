@@ -1,8 +1,14 @@
 """
 tools/l0_probe.py — proves the LIVE DEVICE path (L0), not just L1 fallback.
 
-    python tools/l0_probe.py            (backend must be running on :8000,
-                                          reachable on the real MQTT broker)
+    python tools/l0_probe.py            (backend must be running, default
+                                          :8000, reachable on the real MQTT
+                                          broker)
+
+This calls /api/reset -- point it at an isolated instance (SCW_DB/
+SCW_SESSION on that server), matching SCW_SESSION/SCW_BASE here (both are
+also inherited by the tools/fake_device.py subprocess this launches):
+    SCW_SESSION=nrw8-test SCW_BASE=http://localhost:8793 python tools/l0_probe.py
 
 tools/smoke.py and tools/mqtt_probe.py both run with no device attached, so
 every arrival they trigger resolves through the L1 backend fallback. That
@@ -36,7 +42,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-BASE = "http://localhost:8000"
+BASE = os.environ.get("SCW_BASE", "http://localhost:8000")
 fails = []
 
 

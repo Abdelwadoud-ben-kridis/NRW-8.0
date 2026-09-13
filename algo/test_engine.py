@@ -241,18 +241,18 @@ def test_multi_box_allocation_and_shortfall():
     assert any(x["reason"] == "plus recent (FIFO)" for x in r["rejected"])
 
 
-def test_allocation_splits_only_the_last_box_needed():
-    # 25 needed; the oldest box has 22 (taken whole), and only 3 of BOX-2's
-    # 18 are needed to close the gap (contract 1.7: FIFO picks are partial,
-    # reversing 1.3) -- the remaining 15 stay in BOX-2, READY, at its
-    # original t_in_sim, so it is still first in line next time.
+def test_allocation_never_splits_a_box():
+    # 25 needed; the oldest box has 22, the next has 18. Whole-box-only
+    # (contract 1.9, reversing 1.7's partial picks): BOX-1 is taken whole,
+    # and closing the remaining 3-core gap still takes the WHOLE of BOX-2
+    # (18) rather than splitting it -- qty_allocated overshoots to 40.
     boxes = [_box("BOX-1", "NY-114", 1 * H, "READY", qty=22),
              _box("BOX-2", "NY-114", 5 * H, "READY", qty=18)]
     r = E.fifo_allocate(boxes, "NY-114", 25, 100 * H)
-    assert [p["take"] for p in r["picks"]] == [22, 3]
+    assert [p["take"] for p in r["picks"]] == [22, 18]
     assert r["picks"][0]["partial"] is False
-    assert r["picks"][1]["partial"] is True
-    assert r["qty_allocated"] == 25 and r["shortfall"] == 0
+    assert r["picks"][1]["partial"] is False
+    assert r["qty_allocated"] == 40 and r["shortfall"] == 0
 
 
 def test_batch_tagged_boxes_are_not_general_stock():
@@ -311,8 +311,9 @@ def test_other_references_are_not_touched():
 # --- state machine -----------------------------------------------------------
 
 def test_partial_pick_keeps_t_in_sim():
-    # apply_pick itself still supports a partial take -- fifo_allocate just
-    # no longer ever generates one (see test_allocation_never_splits_a_box).
+    # apply_pick itself still supports a partial take (used generically by
+    # confirm()) -- fifo_allocate just never generates one any more, since
+    # contract 1.9 reverted to whole-box-only picks.
     b = _box("BOX-1", "NY-114", 5 * H, "RESERVED", qty=40)
     patch = E.apply_pick(b, 10)
     assert patch["state"] == "READY" and patch["qty_available"] == 30

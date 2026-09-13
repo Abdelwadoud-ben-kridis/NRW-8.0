@@ -133,11 +133,11 @@ def test_double_confirm_deducts_once():
         check("first confirm applies", r1["already"] is False)
         check("second confirm is a no-op", r2["already"] is True)
         row = DB.one(con, "SELECT * FROM boxes WHERE box_id='BOX-1'")
-        # A pick is partial FIFO (contract 1.7): only the 10 requested come
-        # out of the 40-core box, leaving 30 behind, READY, at their
-        # original t_in_sim. The point of this test is that the SECOND
-        # confirm doesn't try to deduct another 10 on top of that.
-        check("qty deducted exactly once", row["qty_available"] == 30, row["qty_available"])
+        # Whole-box-only (contract 1.9): the demand for 10 still takes the
+        # ENTIRE 40-core box, emptying it. The point of this test is that
+        # the SECOND confirm doesn't try to empty/deduct it again.
+        check("box emptied exactly once", row["state"] == "EMPTY" and row["qty_available"] == 0,
+              row["qty_available"])
         assert_pass(con, 100 * H, "double confirm")
     finally:
         cleanup(con)
@@ -210,31 +210,31 @@ def test_reservation_expiry_cancels_order_and_releases_box():
         cleanup(con)
 
 
-def test_partial_pick_leaves_the_remainder_ready_in_place():
-    # A pick is partial FIFO (contract 1.7, reversing 1.3): reserving 10 out
-    # of a 40-core box takes only the 10 needed, leaving 30 behind in the
-    # SAME box/slot, READY, instead of overshooting to 40 or stranding the
-    # box half-picked in limbo.
+def test_whole_box_pick_overshoots_and_empties_the_box():
+    # Whole-box-only (contract 1.9, reversing 1.7's partial picks):
+    # reserving 10 out of a 40-core box still takes the ENTIRE box,
+    # overshooting the request rather than splitting it.
     con = fresh_con()
     try:
         W.create_box(con, 0.0, _bc(con), C.TARE_G + 40 * 206.0, "test")
         DB.update(con, "boxes", "box_id", "BOX-1", {"state": "READY"})
         plan = W.reserve(con, 100 * H, "NY-114", 10)
-        check("allocates exactly what was requested", plan["qty_allocated"] == 10)
-        check("marked as a partial pick", plan["picks"][0]["partial"] is True)
+        check("allocates the whole box, overshooting the request", plan["qty_allocated"] == 40)
+        check("not marked as a partial pick", plan["picks"][0]["partial"] is False)
         W.confirm(con, 100 * H, plan["order_id"])
         box = DB.one(con, "SELECT * FROM boxes WHERE box_id='BOX-1'")
-        check("box stays READY with the remainder", box["state"] == "READY")
-        check("30 cores left", box["qty_available"] == 30)
-        check("slot kept, not released", box["slot_id"] == "F0-C1-L1")
-        assert_pass(con, 100 * H, "partial pick")
+        check("box fully emptied", box["state"] == "EMPTY")
+        check("0 cores left", box["qty_available"] == 0)
+        check("slot released", box["slot_id"] is None)
+        assert_pass(con, 100 * H, "whole-box pick")
     finally:
         cleanup(con)
 
 
-def test_partial_pick_remainder_is_still_first_out_next_time():
-    # Same box picked twice: the leftover 30 keep the ORIGINAL t_in_sim, so
-    # a newer box of the same reference still loses the FIFO race to them.
+def test_next_demand_moves_on_to_the_next_oldest_box():
+    # BOX-1 (older) gets fully consumed by the first order (whole-box-only,
+    # contract 1.9); a second demand must fall through to BOX-2, not try to
+    # re-pick the now-EMPTY BOX-1.
     con = fresh_con()
     try:
         W.create_box(con, 0.0, _bc(con), C.TARE_G + 40 * 206.0, "test")
@@ -246,9 +246,9 @@ def test_partial_pick_remainder_is_still_first_out_next_time():
         DB.update(con, "boxes", "box_id", "BOX-2", {"state": "READY"})
 
         plan = W.reserve(con, 100 * H, "NY-114", 20)
-        check("still takes the older box first", plan["picks"][0]["box_id"] == "BOX-1")
-        check("takes only the remaining 20 from it", plan["picks"][0]["take"] == 20)
-        assert_pass(con, 100 * H, "partial pick FIFO order preserved")
+        check("moves on to the next-oldest box", plan["picks"][0]["box_id"] == "BOX-2")
+        check("takes the whole of it (overshoot allowed)", plan["picks"][0]["take"] == 50)
+        assert_pass(con, 100 * H, "next box FIFO order")
     finally:
         cleanup(con)
 

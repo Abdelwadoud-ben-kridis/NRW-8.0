@@ -1,18 +1,24 @@
 """
 tools/smoke.py — 60-second proof that the whole backend still works.
 
-    python tools/smoke.py            (backend must be running on :8000)
+    python tools/smoke.py            (backend must be running, default :8000)
+
+This calls /api/reset repeatedly -- it WILL wipe whatever database the
+target server is using. Point it at an isolated instance (SCW_DB/
+SCW_SESSION env vars on that server) rather than a live/demo one:
+    SCW_BASE=http://localhost:8793 python tools/smoke.py
 
 Run it after every merge, and once more at H23 before the feature freeze.
 It exercises the exact path the jury will watch: a box arrives, cures, gets
 proposed by FIFO, and gets picked.
 """
 import json
+import os
 import sys
 import time
 import urllib.request
 
-BASE = "http://localhost:8000"
+BASE = os.environ.get("SCW_BASE", "http://localhost:8000")
 fails = []
 
 
@@ -62,30 +68,31 @@ st = call("/api/state")
 check("boxes cured on their own",
       sum(1 for b in st["boxes"] if b["state"] == "READY") == 2)
 
-# 4. FIFO: oldest first, across two boxes. Picks are partial (contract 1.7,
-#    reversing 1.3): covering 30 takes BOX-1 whole (22) and only 8 of
-#    BOX-2's 18, landing exactly on 30 instead of rounding up to 40.
+# 4. FIFO: oldest first, across two boxes. Picks are WHOLE-BOX-ONLY
+#    (contract 1.9, reversing 1.7's partial picks): covering 30 takes
+#    BOX-1 whole (22) and, since that isn't enough, BOX-2 whole too (18)
+#    -- overshooting to 40 rather than splitting BOX-2.
 plan = call("/api/demand", {"ref": "NY-114", "qty": 30})
-check("lands exactly on 30 (partial pick)", plan["qty_allocated"] == 30, plan["qty_allocated"])
+check("overshoots to 40 (whole-box only)", plan["qty_allocated"] == 40, plan["qty_allocated"])
 check("oldest box first", plan["picks"][0]["box_id"] == "BOX-1",
       [p["box_id"] for p in plan["picks"]])
 check("spans two boxes", len(plan["picks"]) == 2)
-check("takes 22 then only the 8 needed", [p["take"] for p in plan["picks"]] == [22, 8],
+check("takes both boxes whole", [p["take"] for p in plan["picks"]] == [22, 18],
       [p["take"] for p in plan["picks"]])
-check("second pick is marked partial", plan["picks"][1]["partial"] is True)
+check("neither pick is marked partial", not any(p["partial"] for p in plan["picks"]))
 
 st = call("/api/state")
 check("picked boxes are RESERVED",
       sum(1 for b in st["boxes"] if b["state"] == "RESERVED") == 2)
 
-# 5. confirm -> BOX-1 taken whole (empties), BOX-2 keeps its remaining 10
+# 5. confirm -> both boxes taken whole (empty)
 call("/api/demand/confirm", {"order_id": plan["order_id"]})
 st = call("/api/state")
 b1 = [b for b in st["boxes"] if b["box_id"] == "BOX-1"][0]
 b2 = [b for b in st["boxes"] if b["box_id"] == "BOX-2"][0]
 check("BOX-1 emptied and released its slot", b1["state"] == "EMPTY" and not b1["slot_id"])
-check("BOX-2 keeps its remainder, still slotted",
-      b2["state"] == "READY" and b2["qty_available"] == 10 and b2["slot_id"])
+check("BOX-2 also emptied and released its slot",
+      b2["state"] == "EMPTY" and not b2["slot_id"])
 
 # 6. quarantine path
 call("/api/reset", {})
@@ -122,10 +129,11 @@ check("first confirm applies", r1.get("already") is False, r1)
 check("second confirm is a no-op, not an error", r2.get("already") is True, r2)
 st = call("/api/state")
 box1 = [b for b in st["boxes"] if b["box_id"] == "BOX-1"][0]
-# only the 10 requested come out of the 40-core box (partial FIFO, contract
-# 1.7) -- what this test is really proving is that the SECOND confirm
-# doesn't deduct another 10 on top of that
-check("qty deducted exactly once", box1["qty_available"] == 30, box1["qty_available"])
+# whole-box-only (contract 1.9): the demand for 10 still empties the whole
+# 40-core box -- what this test is really proving is that the SECOND
+# confirm doesn't try to empty/deduct it again
+check("box emptied exactly once", box1["state"] == "EMPTY" and box1["qty_available"] == 0,
+      box1["qty_available"])
 
 # confirming a cancelled order is refused, not silently applied
 call("/api/reset", {})

@@ -371,16 +371,16 @@ def fifo_allocate(boxes: list, ref: str, qty: int, now_sim: float,
     `boxes` = every box currently in the warehouse (any ref, any state).
     Returns the contract shape documented in docs/contracts.md section 4.
 
-    Picks are FIFO and may be PARTIAL (contract 1.7, reversing 1.3): a demand
-    takes only what it needs from the oldest box, and any remainder stays
-    READY under its own original `t_in_sim` so it is still first in line
-    next time (`apply_pick`, called by confirm(), already preserved
-    `t_in_sim` on a partial take -- this function simply started generating
-    one again). `qty_allocated` therefore lands exactly on `qty_requested`
-    whenever the pipeline can cover it at all, instead of rounding up to the
-    next whole box. Total READY stock for `ref` must still cover `qty`
-    before anything is reserved: if it doesn't, nothing is picked at all
-    (status IMPOSSIBLE) rather than silently handing out less than asked.
+    Picks are FIFO and WHOLE-BOX-ONLY (contract 1.9, reversing 1.7's partial
+    picks): a demand always takes an entire box, oldest first, even when
+    that overshoots what was actually needed -- `qty_allocated` can land
+    above `qty_requested`. `apply_pick` (called by confirm()) is unchanged
+    and handles any take amount generically; since this function now only
+    ever generates a `take` equal to the box's full `qty_available`,
+    confirming an order always empties every box it reserved. Total READY
+    stock for `ref` must still cover `qty` before anything is reserved: if
+    it doesn't, nothing is picked at all (status IMPOSSIBLE) rather than
+    silently handing out less than asked.
 
     A box already produced FOR another order's production batch
     (`batch_id` set) is not general stock -- it is excluded from `pickable`
@@ -499,10 +499,10 @@ def fifo_allocate(boxes: list, ref: str, qty: int, now_sim: float,
                              "t_in_sim": b["t_in_sim"]})
             continue
         avail = int(b["qty_available"])
-        take = min(avail, needed - taken)
+        take = avail   # contract 1.9: always the whole box, never a partial take
         picks.append({"box_id": b["box_id"], "slot_id": b.get("slot_id"),
                       "take": take, "t_in_sim": b["t_in_sim"],
-                      "rank": len(picks) + 1, "partial": take < avail})
+                      "rank": len(picks) + 1, "partial": False})
         taken += take
 
     return {
@@ -534,7 +534,8 @@ _TRANSITIONS = {
     None:          {"DRYING", "QUARANTINE"},
     "DRYING":      {"READY", "QUARANTINE"},
     "READY":       {"RESERVED", "QUARANTINE", "ARCHIVED"},
-    "RESERVED":    {"READY", "EMPTY"},            # READY: cancel/expiry/partial pick
+    "RESERVED":    {"READY", "EMPTY"},            # READY: cancel/expiry release;
+                                                    # EMPTY: confirm (whole-box-only)
     "EMPTY":       {"ARCHIVED"},
     # ARCHIVED: closes out a dead box for good (backend/warehouse.py::
     # archive_box). DRYING: a re-presented, now-accepted box re-enters the
