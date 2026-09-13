@@ -401,9 +401,139 @@ def fifo_allocate(boxes: list, ref: str, qty: int, now_sim: float,
     The REJECTED list is the deliverable. Anyone can sort a list by date; what
     convinces a jury is showing, per box, the reason it was passed over.
     """
-    rejected = []
     needed = int(qty)
+    pickable, rejected, drying_not_yet_needed = _classify(boxes, ref, now_sim)
 
+    total_avail = sum(int(b["qty_available"]) for b in pickable)
+
+    if total_avail < needed:
+        return _refuse_for_stock(order_id, ref, needed, pickable, rejected,
+                                 drying_not_yet_needed, total_avail)
+
+    picks = []
+    taken = 0
+    for b in pickable:
+        if taken >= needed:
+            rejected.append({"box_id": b["box_id"], "reason": "plus recent (FIFO)",
+                             "detail": "besoin deja couvert par des box plus anciennes",
+                             "t_in_sim": b["t_in_sim"]})
+            continue
+        avail = int(b["qty_available"])
+        take = avail   # contract 1.9: always the whole box, never a partial take
+        picks.append({"box_id": b["box_id"], "slot_id": b.get("slot_id"),
+                      "take": take, "t_in_sim": b["t_in_sim"],
+                      "rank": len(picks) + 1, "partial": False})
+        taken += take
+
+    return {
+        "order_id": order_id,
+        "ref": ref,
+        "qty_requested": needed,
+        "qty_allocated": taken,
+        "shortfall": max(0, needed - taken),
+        "picks": picks,
+        "rejected": rejected,
+        "status": "PENDING" if picks else "IMPOSSIBLE",
+        "eta_sim": None,
+    }
+
+
+def fifo_select_box(boxes: list, box_id: str, now_sim: float,
+                    order_id: str = "ORD-0") -> dict | None:
+    """The operator names a specific box ("BOX-3 (28 units)") instead of a
+    quantity (contract 1.11). FIFO is still ENFORCED, not advisory:
+
+      - the box is reserved, whole, only if it is the oldest pickable box of
+        its reference (the FIFO head) -> status PENDING;
+      - otherwise nothing is reserved (status IMPOSSIBLE) and `rejected`
+        says why, with the requested box listed FIRST: "plus recent (FIFO)"
+        naming the box to use first, or its own non-pickable reason
+        (curing, reserved, quarantine, held for a batch...). `fifo_head`
+        names the box that should go out instead.
+
+    Same classification as fifo_allocate (_classify), so the two paths can
+    never disagree about what is pickable or why. Returns None for an unknown
+    box or one with no identified reference -- the caller answers that.
+    """
+    target = next((b for b in boxes if b["box_id"] == box_id), None)
+    if target is None or not target.get("article_ref"):
+        return None
+    ref = target["article_ref"]
+    pickable, rejected, _drying = _classify(boxes, ref, now_sim)
+    qty = int(target["qty_available"])
+    head = pickable[0] if pickable else None
+    plan = {"order_id": order_id, "ref": ref, "box_requested": box_id,
+            "fifo_head": head["box_id"] if head else None,
+            "qty_requested": qty, "eta_sim": None}
+
+    if head is not None and head["box_id"] == box_id:
+        for b in pickable[1:]:
+            rejected.append({"box_id": b["box_id"], "reason": "plus recent (FIFO)",
+                             "detail": "%s sort en premier" % box_id,
+                             "t_in_sim": b["t_in_sim"]})
+        plan.update(qty_allocated=qty, shortfall=0, status="PENDING", rejected=rejected,
+                    picks=[{"box_id": box_id, "slot_id": target.get("slot_id"),
+                            "take": qty, "t_in_sim": target["t_in_sim"],
+                            "rank": 1, "partial": False}])
+        return plan
+
+    if any(b["box_id"] == box_id for b in pickable):
+        rejected.append({"box_id": box_id, "reason": "plus recent (FIFO)",
+                         "detail": "utiliser %s d'abord" % head["box_id"],
+                         "t_in_sim": target["t_in_sim"]})
+    # the requested box's own entry first -- it is the answer to "why not?"
+    rejected.sort(key=lambda r: r["box_id"] != box_id)
+    if target["state"] == "DRYING" and not is_cured(
+            target["t_in_sim"], target["required_cure_h"], now_sim):
+        plan["eta_sim"] = target["t_in_sim"] + target["required_cure_h"] * 3600.0
+    plan.update(qty_allocated=0, shortfall=qty, status="IMPOSSIBLE",
+                picks=[], rejected=rejected)
+    return plan
+
+
+def _refuse_for_stock(order_id, ref, needed, pickable, rejected,
+                      drying_not_yet_needed, total_avail) -> dict:
+    # Not enough READY stock to cover the request -- refuse the whole
+    # reservation instead of reserving whatever is available. Every
+    # otherwise-pickable box still shows up in `rejected`, so the jury
+    # sees a stock problem, not a state problem.
+    for b in pickable:
+        rejected.append({
+            "box_id": b["box_id"], "reason": "stock insuffisant",
+            "detail": "%d disponible(s) au total pour %d demande(s)"
+                      % (total_avail, needed),
+            "t_in_sim": b["t_in_sim"]})
+
+    # How long until the curing pipeline alone would cover the gap, so
+    # the refusal can say WHEN instead of just NO (criterion 6). Boxes
+    # still curing are walked oldest-ready-first; a shortfall this
+    # cannot close at all (not enough even once every one of them cures)
+    # leaves eta_sim as None -- that's exactly when backend/warehouse.py
+    # ::reserve opens a production batch instead.
+    eta_sim = None
+    cum = total_avail
+    for b in sorted(drying_not_yet_needed,
+                    key=lambda x: x["t_in_sim"] + x["required_cure_h"] * 3600.0):
+        if cum >= needed:
+            break
+        cum += int(b["qty_available"])
+        if cum >= needed:
+            eta_sim = b["t_in_sim"] + b["required_cure_h"] * 3600.0
+
+    return {
+        "order_id": order_id, "ref": ref, "qty_requested": needed,
+        "qty_allocated": 0, "shortfall": needed,
+        "picks": [], "rejected": rejected, "status": "IMPOSSIBLE",
+        "eta_sim": eta_sim,
+    }
+
+
+def _classify(boxes: list, ref: str, now_sim: float) -> tuple[list, list, list]:
+    """Split every box of `ref`, in FIFO order, into (pickable, rejected,
+    drying_not_yet_needed) -- the one place that decides whether a box can
+    go out right now and, if not, the reason shown to the jury. Shared by
+    fifo_allocate (quantity demand) and fifo_select_box (box demand)."""
+    rejected = []
     candidates = [b for b in boxes if b["article_ref"] == ref]
     # deterministic FIFO key: oldest stored first, numeric box_id breaks ties
     candidates.sort(key=fifo_key)
@@ -463,69 +593,7 @@ def fifo_allocate(boxes: list, ref: str, qty: int, now_sim: float,
 
         pickable.append(b)
 
-    total_avail = sum(int(b["qty_available"]) for b in pickable)
-
-    if total_avail < needed:
-        # Not enough READY stock to cover the request -- refuse the whole
-        # reservation instead of reserving whatever is available. Every
-        # otherwise-pickable box still shows up in `rejected`, so the jury
-        # sees a stock problem, not a state problem.
-        for b in pickable:
-            rejected.append({
-                "box_id": b["box_id"], "reason": "stock insuffisant",
-                "detail": "%d disponible(s) au total pour %d demande(s)"
-                          % (total_avail, needed),
-                "t_in_sim": b["t_in_sim"]})
-
-        # How long until the curing pipeline alone would cover the gap, so
-        # the refusal can say WHEN instead of just NO (criterion 6). Boxes
-        # still curing are walked oldest-ready-first; a shortfall this
-        # cannot close at all (not enough even once every one of them cures)
-        # leaves eta_sim as None -- that's exactly when backend/warehouse.py
-        # ::reserve opens a production batch instead.
-        eta_sim = None
-        cum = total_avail
-        for b in sorted(drying_not_yet_needed,
-                        key=lambda x: x["t_in_sim"] + x["required_cure_h"] * 3600.0):
-            if cum >= needed:
-                break
-            cum += int(b["qty_available"])
-            if cum >= needed:
-                eta_sim = b["t_in_sim"] + b["required_cure_h"] * 3600.0
-
-        return {
-            "order_id": order_id, "ref": ref, "qty_requested": needed,
-            "qty_allocated": 0, "shortfall": needed,
-            "picks": [], "rejected": rejected, "status": "IMPOSSIBLE",
-            "eta_sim": eta_sim,
-        }
-
-    picks = []
-    taken = 0
-    for b in pickable:
-        if taken >= needed:
-            rejected.append({"box_id": b["box_id"], "reason": "plus recent (FIFO)",
-                             "detail": "besoin deja couvert par des box plus anciennes",
-                             "t_in_sim": b["t_in_sim"]})
-            continue
-        avail = int(b["qty_available"])
-        take = avail   # contract 1.9: always the whole box, never a partial take
-        picks.append({"box_id": b["box_id"], "slot_id": b.get("slot_id"),
-                      "take": take, "t_in_sim": b["t_in_sim"],
-                      "rank": len(picks) + 1, "partial": False})
-        taken += take
-
-    return {
-        "order_id": order_id,
-        "ref": ref,
-        "qty_requested": needed,
-        "qty_allocated": taken,
-        "shortfall": max(0, needed - taken),
-        "picks": picks,
-        "rejected": rejected,
-        "status": "PENDING" if picks else "IMPOSSIBLE",
-        "eta_sim": None,
-    }
+    return pickable, rejected, drying_not_yet_needed
 
 
 # ---------------------------------------------------------------------------

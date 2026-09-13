@@ -59,7 +59,7 @@ separate CAD deliverable.
 | 3 | Deduce the quantity | 15 | `algo/engine.py::assess_box` — net weight ÷ that barcode's own registered per-noyau mass is the count; the vision station's visible-core count is a lower-bound cross-check (contract 1.10) |
 | 4 | Track drying, ready / not ready at 24 h | 10 | `engine.required_cure_h` (fixed 24 h, contract 1.2) + the `sweep_cured` tick; the box's automatic timestamp (CDC task 3) is `create_box`'s `t_in_sim` |
 | 5 | FIFO — classify and locate by type, quantity, storage date | 15 | `engine.fifo_key` + `by_ref` panel + `slots` table + inventory arrival/cure columns |
-| 6 | Automatically propose the right box | 15 | `engine.fifo_allocate` → the proposal panel, with every rejected box and why |
+| 6 | Automatically propose the right box | 15 | the dashboard demands a box, "BOX-3 (28 units)", never a quantity: `engine.fifo_select_box` reserves it only if it is the FIFO head, otherwise refuses and names the box to use first (contract 1.11) → the proposal panel, with every rejected box and why. `engine.fifo_allocate` (quantity demand) stays API-only |
 | 7 | Mechanical design **and** animated 3D | **25** | **a separate CAD/3D project**, not this repo — see the note below |
 | 8 | Real-time interactive dashboard | 15 | `dashboard/index.html` + `app.js` |
 | 9 | Full embedded simulation (ESP32) | 15 | `firmware/sketch.ino` on Wokwi |
@@ -82,7 +82,8 @@ that ahead of an actual request.
 in CONTRACT VERSION 1.2 — the CDC never asked for it). `docs/demo-script.md`
 beat 7 carries three fully-built, demonstrable answers: the FIFO
 rejected-list audit trail with the `/db` consistency checker; make-to-order
-production batches (CONTRACT VERSION 1.6) — when existing stock genuinely
+production batches (CONTRACT VERSION 1.6; API-only since 1.11, through
+`POST /api/demand` by quantity — not part of the live dashboard demo) — when existing stock genuinely
 can't cover a demand, the order opens a tracked production batch instead of
 a flat refusal, and ships every box in it together the moment the last one
 clears its 24 h cure, short and flagged rather than blocked if one was lost
@@ -386,6 +387,9 @@ reverse, because 55 of the 160 points are things the jury has to *see happen*.
   same answer twice — which matters when the jury asks you to run it again.
   Picks are whole-box-only (contract 1.9): a demand always takes an entire
   box, oldest first, even if that overshoots what was actually asked for
-  rather than splitting one. `POST /api/demand/oldest` skips picking a
-  reference entirely and takes whichever ready box has been sitting
-  longest, any reference.
+  rather than splitting one. The dashboard never asks for a quantity at all
+  (contract 1.11): the operator picks a box — "BOX-3 (28 units)" — and gets
+  it only if it is the oldest ready box of its reference; otherwise the
+  refusal names the box to take first. `POST /api/demand/oldest` skips
+  picking entirely and takes whichever ready box has been sitting longest,
+  any reference.

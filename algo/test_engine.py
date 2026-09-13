@@ -239,6 +239,52 @@ def test_mismatch_anomaly_is_caught_end_to_end_for_every_quantity():
             assert not r["accepted"], (art["ref"], qty, r)
 
 
+# --- criteria 5 + 6: demand by box, FIFO enforced (contract 1.11) -----------
+
+def _demo_boxes(**overrides):
+    return [_box("BOX-1", "NY-114", 0.0, "READY", qty=40, **overrides.get("BOX-1", {})),
+            _box("BOX-3", "NY-114", 7 * H, "READY", qty=28),
+            _box("BOX-5", "NY-114", 19 * H, "DRYING", qty=40),
+            _box("BOX-2", "NY-220", 3 * H, "READY", qty=24)]
+
+
+def test_box_demand_reserves_the_fifo_head_whole():
+    p = E.fifo_select_box(_demo_boxes(), "BOX-1", 34 * H, "ORD-1")
+    assert p["status"] == "PENDING" and p["fifo_head"] == "BOX-1"
+    assert [x["box_id"] for x in p["picks"]] == ["BOX-1"] and p["picks"][0]["take"] == 40
+    assert p["qty_requested"] == p["qty_allocated"] == 40 and not p["picks"][0]["partial"]
+    assert {r["box_id"]: r["reason"] for r in p["rejected"]} == {
+        "BOX-3": "plus recent (FIFO)", "BOX-5": "sechage insuffisant"}   # other refs untouched
+
+
+def test_box_demand_for_a_newer_box_is_refused_naming_the_fifo_head():
+    p = E.fifo_select_box(_demo_boxes(), "BOX-3", 34 * H)
+    assert p["status"] == "IMPOSSIBLE" and p["picks"] == [] and p["qty_allocated"] == 0
+    assert p["fifo_head"] == "BOX-1"
+    assert p["rejected"][0] == {"box_id": "BOX-3", "reason": "plus recent (FIFO)",
+                                "detail": "utiliser BOX-1 d'abord", "t_in_sim": 7 * H}
+
+
+def test_box_demand_for_a_curing_box_is_refused_with_its_eta():
+    p = E.fifo_select_box(_demo_boxes(), "BOX-5", 34 * H)
+    assert p["status"] == "IMPOSSIBLE" and p["rejected"][0]["box_id"] == "BOX-5"
+    assert p["rejected"][0]["reason"] == "sechage insuffisant"
+    assert p["eta_sim"] == 43 * H
+
+
+def test_box_demand_never_hands_out_a_batch_box():
+    boxes = _demo_boxes(**{"BOX-1": {"batch_id": "ORD-9"}})
+    p = E.fifo_select_box(boxes, "BOX-1", 34 * H)
+    assert p["status"] == "IMPOSSIBLE" and p["rejected"][0]["reason"] == "reserve au lot"
+    assert p["fifo_head"] == "BOX-3"
+
+
+def test_box_demand_for_an_unknown_or_unidentified_box_is_none():
+    assert E.fifo_select_box(_demo_boxes(), "BOX-99", 34 * H) is None
+    ghost = [_box("BOX-7", None, 0.0, "QUARANTINE", qty=0)]
+    assert E.fifo_select_box(ghost, "BOX-7", 34 * H) is None
+
+
 def test_quarantine_can_re_enter_drying_on_a_successful_recount():
     # contract 1.7: quarantine is no longer a dead end for a box whose
     # barcode is still known and valid.

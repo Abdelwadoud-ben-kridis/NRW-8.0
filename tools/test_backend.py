@@ -661,6 +661,38 @@ def test_recount_box_refuses_without_a_known_barcode():
         cleanup(con)
 
 
+def test_box_demand_locks_only_the_fifo_head():
+    # contract 1.11: demand by box, FIFO enforced at the DB layer too.
+    con = fresh_con()
+    try:
+        W.create_box(con, 0.0, _bc(con), C.TARE_G + 40 * 206.0, "test")
+        W.create_box(con, 1 * H, _bc(con), C.TARE_G + 28 * 206.0, "test")
+        now = 30 * H
+        refused = W.reserve_box(con, now, "BOX-2")
+        check("newer box refused, FIFO head named",
+             refused["status"] == "IMPOSSIBLE" and refused["fifo_head"] == "BOX-1", refused)
+        row2 = DB.one(con, "SELECT * FROM boxes WHERE box_id='BOX-2'")
+        check("refused box is not locked", row2["state"] == "READY" and row2["locked_by"] is None)
+        ok = W.reserve_box(con, now, "BOX-1")
+        check("FIFO head reserved whole",
+             ok["status"] == "PENDING" and ok["picks"][0]["take"] == 40, ok)
+        row1 = DB.one(con, "SELECT * FROM boxes WHERE box_id='BOX-1'")
+        check("head locked by that order",
+             row1["state"] == "RESERVED" and row1["locked_by"] == ok["order_id"])
+        W.confirm(con, now, ok["order_id"])
+        nxt = W.reserve_box(con, now, "BOX-2")
+        check("once the head has shipped, the next box is reservable",
+             nxt["status"] == "PENDING", nxt)
+        try:
+            W.reserve_box(con, now, "BOX-99")
+            check("unknown box raises", False)
+        except W.OpError as e:
+            check("unknown box is a 404", e.code == 404)
+        assert_pass(con, now, "box demand")
+    finally:
+        cleanup(con)
+
+
 def test_unknown_reference_demand_is_refused_not_a_batch():
     # contract 1.10: an unknown ref used to open an IN_PRODUCTION batch.
     con = fresh_con()

@@ -834,21 +834,44 @@ async def api_demand(body: dict):
     return plan
 
 
+@app.post("/api/demand/box")
+async def api_demand_box(body: dict):
+    """Criterion 6, contract 1.11: production asks for a specific box
+    ("BOX-3 (28 units)"), never a quantity -- this is what the dashboard's
+    demand form uses. FIFO is enforced (W.reserve_box ->
+    engine.fifo_select_box): only the oldest pickable box of its reference is
+    reserved; any other box is refused with the reason and the box to use
+    first."""
+    box_id = body.get("box_id")
+    if not isinstance(box_id, str) or not box_id.strip():
+        return JSONResponse({"error": "box_id is required"}, 400)
+    try:
+        plan = W.reserve_box(con, clock.t_sim, box_id.strip())
+    except W.OpError as e:
+        return JSONResponse({"error": e.message}, e.code)
+    STATE["last_order"] = plan
+    await broadcast()
+    return plan
+
+
 @app.post("/api/demand/oldest")
 async def api_demand_oldest():
     """Convenience: skip picking a reference -- reserve whichever READY box
     (any reference) has been sitting longest, whole (contract 1.9's
     whole-box-only allocation already guarantees a demand for exactly that
-    box's own quantity takes the entire box). Reuses W.reserve() with that
-    box's own ref/qty, so it's the same audited FIFO path as a normal
-    demand, not a separate code path. Batch-tagged boxes are excluded --
+    box's own quantity takes the entire box). Reuses W.reserve_box() on that
+    box (contract 1.11) -- it is always the FIFO head of its reference, so
+    it's the same audited FIFO path as a box demand, not a separate one. Batch-tagged boxes are excluded --
     they are not general stock even once READY (see reserve()'s own
     exclusion for why)."""
     rows = DB.rows(con, "SELECT * FROM boxes WHERE state='READY' AND batch_id IS NULL")
     if not rows:
         return JSONResponse({"error": "no ready boxes"}, 404)
     oldest = min(rows, key=E.fifo_key)
-    plan = W.reserve(con, clock.t_sim, oldest["article_ref"], oldest["qty_available"])
+    try:
+        plan = W.reserve_box(con, clock.t_sim, oldest["box_id"])
+    except W.OpError as e:
+        return JSONResponse({"error": e.message}, e.code)
     STATE["last_order"] = plan
     await broadcast()
     return plan

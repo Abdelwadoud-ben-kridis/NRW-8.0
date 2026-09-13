@@ -40,7 +40,9 @@ let activeView = "rack";        // "rack" | "twin"
 let selectedSlot = null;        // slot_id currently pinned in the inspector
 let invSort = { key: "t_in_sim", dir: 1 };
 let invSearch = "";
-let refAvail = {};        // ref -> total READY cores, refreshed every snapshot (st.by_ref)
+let boxPickerSig = "";    // demand box picker: rebuild options only when the list changes
+let boxRows = [];         // boxes currently offered in the picker
+let boxHeadOf = {};       // ref -> FIFO head box_id (st.by_ref)
 
 const hk = (k) => ` <span class="hk">${k}</span>`;
 
@@ -90,9 +92,9 @@ function paintLabels() {
   $("h-cure").textContent = L.cureNow;
 
   $("h-dem").textContent = L.demand;
-  $("l-dref").textContent = L.article;
-  $("l-dqty").textContent = L.qty;
-  $("btn-demand").innerHTML = L.ask + hk("D");
+  $("l-dbox").textContent = L.boxPick;
+  boxPickerSig = "";          // relabel the picker's options in the new language
+  $("btn-demand").innerHTML = L.askBox + hk("D");
   $("btn-demand-oldest").textContent = L.askOldest;
   $("btn-confirm").innerHTML = L.confirm + hk("C");
   $("btn-cancel").textContent = L.cancel;
@@ -222,6 +224,10 @@ const tDet = (s) => {
   if (m) return L.detVisionRecount(m[1], m[2], m[3]);
   m = /^ecart de comptage : pesee (\d+), vision (\d+) noyaux$/.exec(s);
   if (m) return L.detCountGap(m[1], m[2]);
+  m = /^utiliser (\S+) d'abord$/.exec(s);
+  if (m) return L.detUseFirst(m[1]);
+  m = /^(\S+) sort en premier$/.exec(s);
+  if (m) return L.detGoesFirst(m[1]);
   return s;
 };
 
@@ -504,9 +510,7 @@ function render(st) {
   updateRack(st);
 
   // --- CDC task 5: classify stock BY TYPE, with the FIFO head named ---
-  refAvail = {};
-  (st.by_ref || []).forEach((r) => { refAvail[r.ref] = r.ready; });
-  updateDemandHint();
+  renderBoxPicker(st);
   $("byref").tBodies[0].innerHTML = (st.by_ref || []).map((r) => `
     <tr title="${r.label} — ${r.unit_mass_g} g${r.fifo_head
         ? ` · ${L.nextOut}: ${r.fifo_head} @ ${r.fifo_head_slot}` : ""}">
@@ -521,15 +525,18 @@ function render(st) {
   const o = st.last_order;
   $("order").innerHTML = !o ? `<div class="muted">${L.noOrder}</div>` : `
     <div class="order">
-      <div class="hd"><span>${o.order_id} · ${o.ref}</span>
+      <div class="hd"><span>${o.order_id} · ${o.box_requested ? o.box_requested + " · " : ""}${o.ref}</span>
         <span>${o.qty_allocated}/${o.qty_requested}</span></div>
       <div class="sub muted">
         <span>${o.status === "CANCELLED" ? L.reservationReleased
               : o.status === "IN_PRODUCTION" ? L.batchOpened : (o.status || "")}</span>
         ${o.shortfall ? `<span style="color:#ff9a9a">${L.shortfall}: ${o.shortfall}</span>` : ""}
-        ${o.status === "IMPOSSIBLE"
-          ? `<span title="${L.etaHint(o.eta_sim != null ? simLabel(o.eta_sim) : "")}">${
-              o.eta_sim != null ? L.etaHint(simLabel(o.eta_sim)) : L.etaNone}</span>` : ""}
+        ${o.status !== "IMPOSSIBLE" ? ""
+          : o.box_requested
+            ? `<span style="color:#ff9a9a">${o.eta_sim != null ? L.etaBox(simLabel(o.eta_sim))
+                : o.fifo_head && o.fifo_head !== o.box_requested ? L.useFirst(o.fifo_head) : ""}</span>`
+            : `<span title="${L.etaHint(o.eta_sim != null ? simLabel(o.eta_sim) : "")}">${
+                o.eta_sim != null ? L.etaHint(simLabel(o.eta_sim)) : L.etaNone}</span>`}
       </div>
       <div class="muted" style="margin-top:6px">${L.picks}</div>
       ${(o.picks || []).map((p) => `<div class="pick">
@@ -803,17 +810,14 @@ async function refreshArticles() {
   ARTICLES = await api("/articles");
   const opts = ARTICLES.map((a) =>
     `<option value="${a.ref}">${a.ref} — ${a.label} (${a.unit_mass_g} g)</option>`).join("");
-  const prevArt = $("art").value, prevDref = $("dref").value, prevFilt = $("filt").value;
+  const prevArt = $("art").value, prevFilt = $("filt").value;
   $("art").innerHTML = opts;
-  $("dref").innerHTML = opts;
   $("filt").innerHTML = `<option value="*">${L.filterAll}</option>` +
     ["DRYING", "READY", "RESERVED", "QUARANTINE", "EMPTY"].map((s) =>
       `<option value="${s}">${L.st[s]}</option>`).join("") +
     ARTICLES.map((a) => `<option value="${a.ref}">${a.ref}</option>`).join("");
   if (ARTICLES.some((a) => a.ref === prevArt)) $("art").value = prevArt;
-  if (ARTICLES.some((a) => a.ref === prevDref)) $("dref").value = prevDref;
   if (prevFilt === "*" || [...$("filt").options].some((o) => o.value === prevFilt)) $("filt").value = prevFilt;
-  updateDemandHint();
 }
 
 // A worker registers a barcode well before the box ever arrives (CDC step
@@ -830,23 +834,47 @@ async function refreshBarcodes() {
   if ((rows || []).some((b) => b.barcode_id === prev)) $("bc-pick").value = prev;
 }
 
-// Live "N in stock" hint for the demand form, driven by the same by_ref
-// totals the KPI/stock panel already shows -- this never invents a number,
-// it just previews the check the backend will make anyway (fifo_allocate:
-// a box is never split, so asking for more than total READY stock for the
-// ref is refused outright, contract 1.3).
-function updateDemandHint() {
-  const ref = $("dref").value;
-  const avail = refAvail[ref] || 0;
-  const qty = +$("dqty").value || 0;
-  const over = qty > avail;
-  $("dem-avail").textContent = over ? L.demandTooMuch(avail) : L.demandAvail(avail);
-  $("dem-avail").classList.toggle("over", over);
-  // A warning, never a block (contract 1.10): asking for more than is READY
-  // is exactly how the backend's own answer gets shown -- a refusal with
-  // reasons and an ETA, or a production batch. Only a non-positive qty or
-  // no reference at all is not worth a round trip.
-  return !!ref && qty > 0;
+// Demand by box (contract 1.11): the operator picks a specific box
+// ("BOX-3 (28 units) · NY-114"), never a quantity. Offered in FIFO order
+// (st.boxes is already sorted by engine.fifo_key), READY and still-curing
+// boxes, with each reference's FIFO head marked "next out". FIFO is ENFORCED
+// by the backend (engine.fifo_select_box): picking any other box is refused
+// with the reason -- the hint below only previews that, it decides nothing.
+function renderBoxPicker(st) {
+  boxHeadOf = {};
+  (st.by_ref || []).forEach((r) => { if (r.fifo_head) boxHeadOf[r.ref] = r.fifo_head; });
+  const isHead = (b) => boxHeadOf[b.ref] === b.box_id;
+  boxRows = st.boxes.filter((b) => b.slot_id && b.ref && !b.batch_id &&
+    (b.state === "READY" || b.state === "DRYING") && b.qty_available > 0);
+  const sig = L.lang + "|" + boxRows.map((b) =>
+    `${b.box_id}:${b.state}:${b.qty_available}:${isHead(b) ? 1 : 0}`).join(",");
+  const sel = $("dbox");
+  if (sig !== boxPickerSig) {
+    boxPickerSig = sig;
+    const prev = sel.value;
+    sel.innerHTML = boxRows.length
+      ? boxRows.map((b) => `<option value="${b.box_id}">${b.box_id} (${L.unitsN(b.qty_available)}) · ${b.ref}${
+          isHead(b) ? " · " + L.nextOutShort
+          : b.state === "DRYING" ? " · " + L.st.DRYING.toLowerCase() : ""}</option>`).join("")
+      : `<option value="">${L.noBoxes}</option>`;
+    if (boxRows.some((b) => b.box_id === prev)) sel.value = prev;
+    else {
+      const head = boxRows.find(isHead);
+      if (head) sel.value = head.box_id;
+    }
+  }
+  updateBoxHint();
+}
+
+function updateBoxHint() {
+  const b = boxRows.find((x) => x.box_id === $("dbox").value);
+  let txt, warn = true;
+  if (!b) txt = L.noBoxes;
+  else if (boxHeadOf[b.ref] === b.box_id) { txt = L.boxIsHead(b.ref); warn = false; }
+  else if (b.state === "DRYING") txt = L.boxCuring(b.h_remaining);
+  else txt = L.boxNotHead(boxHeadOf[b.ref]);
+  $("dem-avail").textContent = txt;
+  $("dem-avail").classList.toggle("over", warn);
 }
 
 function openDrawer(id) { $(id).classList.add("open"); }
@@ -1046,18 +1074,17 @@ async function boot() {
       try { await fn(); } finally { orderOpBusy = false; if (ST) render(ST); }
     };
   };
-  $("dref").addEventListener("change", updateDemandHint);
-  $("dqty").addEventListener("input", updateDemandHint);
+  $("dbox").addEventListener("change", updateBoxHint);
   $("btn-demand").onclick = async () => {
     const b = $("btn-demand");
     if (b.disabled) return;
-    // Only refuses an empty/non-positive request client-side; over-stock
-    // demands go through so the backend can answer IMPOSSIBLE (with ETA)
-    // or open a production batch (contract 1.10).
-    if (!updateDemandHint()) return;
+    // Demand by box (contract 1.11). A non-FIFO pick is still sent: the
+    // backend's refusal, with its reason, is what the jury should see.
+    const boxId = $("dbox").value;
+    if (!boxId) return;
     b.disabled = true;
     try {
-      await api("/demand", { ref: $("dref").value, qty: +$("dqty").value });
+      await api("/demand/box", { box_id: boxId });
       renderLog();
     } finally { b.disabled = false; }
   };

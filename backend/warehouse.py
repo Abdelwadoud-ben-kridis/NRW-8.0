@@ -298,21 +298,7 @@ def reserve(con, now_sim: float, ref: str, qty: int) -> dict:
             # Enough exists somewhere in the pipeline (curing/reserved) --
             # fall through to the unchanged IMPOSSIBLE refusal below.
 
-        expires = now_sim + C.LOCK_TTL_H * 3600.0
-        for p in plan["picks"]:
-            n = DB.cas_update(con, "boxes", "box_id", p["box_id"],
-                              expect={"state": "READY", "locked_by": None},
-                              patch={"state": "RESERVED", "locked_by": order_id,
-                                     "lock_expires_sim": expires})
-            if n != 1:
-                raise OpError(
-                    "internal: box %s was no longer available to reserve"
-                    % p["box_id"], code=409)
-            if p.get("slot_id"):
-                DB.cas_update(con, "slots", "slot_id", p["slot_id"],
-                              expect={"reserved_for": None},
-                              patch={"reserved_for": order_id})
-            p["lock_expires_sim"] = expires
+        expires = _lock_picks(con, plan, order_id, now_sim)
 
         con.execute(
             "INSERT INTO orders(order_id,ref,qty_requested,qty_allocated,"
@@ -322,6 +308,61 @@ def reserve(con, now_sim: float, ref: str, qty: int) -> dict:
         DB.log_event(con, now_sim, "demand", {
             "order_id": order_id, "ref": ref, "qty": int(qty),
             "allocated": plan["qty_allocated"],
+            "picks": [p["box_id"] for p in plan["picks"]],
+            "rejected": len(plan["rejected"]),
+            "lock_expires_sim": expires if plan["picks"] else None})
+        DB.meta_set(con, "t_sim", now_sim)
+        return plan
+
+
+def _lock_picks(con, plan: dict, order_id: str, now_sim: float) -> float:
+    """Compare-and-set lock every picked box (and its slot) for `order_id`,
+    inside the caller's transaction. Returns the lock expiry."""
+    expires = now_sim + C.LOCK_TTL_H * 3600.0
+    for p in plan["picks"]:
+        n = DB.cas_update(con, "boxes", "box_id", p["box_id"],
+                          expect={"state": "READY", "locked_by": None},
+                          patch={"state": "RESERVED", "locked_by": order_id,
+                                 "lock_expires_sim": expires})
+        if n != 1:
+            raise OpError(
+                "internal: box %s was no longer available to reserve"
+                % p["box_id"], code=409)
+        if p.get("slot_id"):
+            DB.cas_update(con, "slots", "slot_id", p["slot_id"],
+                          expect={"reserved_for": None},
+                          patch={"reserved_for": order_id})
+        p["lock_expires_sim"] = expires
+    return expires
+
+
+def reserve_box(con, now_sim: float, box_id: str) -> dict:
+    """Demand by box (contract 1.11): production names a specific box, never
+    a quantity. FIFO stays enforced -- algo.engine.fifo_select_box reserves
+    the box (whole) only if it is the oldest pickable box of its reference;
+    otherwise the order is recorded as IMPOSSIBLE with the reason and the box
+    to use first, exactly like any other refusal, and nothing is locked.
+    Same single IMMEDIATE transaction and CAS locking as reserve().
+    """
+    with DB.transaction(con):
+        sweep_cured(con, now_sim)
+        boxes = DB.rows(con, "SELECT * FROM boxes")
+        target = next((b for b in boxes if b["box_id"] == box_id), None)
+        if target is None:
+            raise OpError("unknown box: %s" % box_id, code=404)
+        if not target["article_ref"]:
+            raise OpError("box %s has no identified reference" % box_id, code=409)
+        order_id = DB.next_id(con, "orders", "order_id", "ORD")
+        plan = E.fifo_select_box(boxes, box_id, now_sim, order_id)
+        expires = _lock_picks(con, plan, order_id, now_sim)
+        con.execute(
+            "INSERT INTO orders(order_id,ref,qty_requested,qty_allocated,"
+            "status,created_sim,payload) VALUES (?,?,?,?,?,?,?)",
+            (order_id, plan["ref"], plan["qty_requested"], plan["qty_allocated"],
+             plan["status"], now_sim, json.dumps(plan, ensure_ascii=False)))
+        DB.log_event(con, now_sim, "demand", {
+            "order_id": order_id, "ref": plan["ref"], "box": box_id,
+            "qty": plan["qty_requested"], "allocated": plan["qty_allocated"],
             "picks": [p["box_id"] for p in plan["picks"]],
             "rejected": len(plan["rejected"]),
             "lock_expires_sim": expires if plan["picks"] else None})
