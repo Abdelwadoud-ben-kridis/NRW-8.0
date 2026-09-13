@@ -214,6 +214,9 @@ button.textlink:hover{background:none;color:var(--accent)}
 .stage-fault .stageicon{color:var(--bad);border-color:rgba(255,93,108,.28);
   background:rgba(255,93,108,.08);animation:pulse-bad 1.1s ease-in-out infinite}
 @keyframes pulse-bad{0%,100%{box-shadow:0 0 0 rgba(255,93,108,.4)}50%{box-shadow:0 0 12px rgba(255,93,108,.35)}}
+#stage-confirm-cta{width:100%;margin-top:10px;animation:pulse-cta 1.6s ease-in-out infinite}
+#stage-confirm-cta:disabled{animation:none;opacity:.5}
+@keyframes pulse-cta{0%,100%{box-shadow:0 0 0 rgba(34,211,238,.35)}50%{box-shadow:0 0 10px rgba(34,211,238,.45)}}
 
 /* ============================================================
    LIVE ESP32 INSTRUMENT PANEL

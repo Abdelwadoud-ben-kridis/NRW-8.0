@@ -409,6 +409,19 @@ function render(st) {
   $("stage-label").textContent = label;
   $("stage-sub").textContent = sub;
 
+  // --- confirm suggestion: a fully-covered order is only ever confirmed
+  // by a click (never auto-confirmed) -- this just makes that click hard
+  // to miss instead of requiring the operator to notice a small button
+  // buried in the proposal panel or the pending-reservations list.
+  const readyOrder = st.last_order && st.last_order.status === "PENDING"
+    ? st.last_order : null;
+  const cta = $("stage-confirm-cta");
+  cta.hidden = !readyOrder;
+  if (readyOrder) {
+    cta.textContent = L.confirmSuggestion(readyOrder.order_id, readyOrder.qty_allocated);
+    cta.disabled = orderOpBusy;
+  }
+
   // --- ESP32 instrument panel ---
   const dev = st.device;
   $("esp32-online").className = "pill " + (dev.online ? "on" : "off");
@@ -1055,6 +1068,8 @@ async function boot() {
     api("/demand/confirm", { order_id: ST.last_order.order_id }).then(renderLog));
   guardedOrderOp($("btn-cancel"), () => ST?.last_order &&
     api("/demand/cancel", { order_id: ST.last_order.order_id }).then(renderLog));
+  guardedOrderOp($("stage-confirm-cta"), () => ST?.last_order &&
+    api("/demand/confirm", { order_id: ST.last_order.order_id }).then(renderLog));
 
   document.querySelectorAll("[data-cam]").forEach((b) =>
     b.onclick = () => setCamera(b.dataset.cam));

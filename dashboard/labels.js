@@ -67,6 +67,7 @@ export const EN = {
   stageFault: "FAULT", stageCuring: "CURING IN PROGRESS", stageReady: "READY",
   stageIdleSub: "no activity in progress",
   stageSub: "derived from ESP32 state, crane command and last order",
+  confirmSuggestion: (id, qty) => `Pickup ready — confirm ${id} (${qty} cores)?`,
 
   // --- ESP32 instrument panel -----------------------------------------------
   liveEsp32: "Live ESP32", beamCount: "cores (beam)", visionRef: "vision id",
@@ -233,6 +234,7 @@ export const FR = {
   stageFault: "DÉFAUT", stageCuring: "SÉCHAGE EN COURS", stageReady: "PRÊT",
   stageIdleSub: "aucune activité en cours",
   stageSub: "déduit de l'état ESP32, de la commande du pont et de la commande en cours",
+  confirmSuggestion: (id, qty) => `Prélèvement prêt — valider ${id} (${qty} noyaux) ?`,
 
   // --- ESP32 instrument panel -----------------------------------------------
   liveEsp32: "ESP32 en direct", beamCount: "noyaux (barrière)", visionRef: "identification vision",
