@@ -182,6 +182,7 @@ def box_view(b: dict, now: float) -> dict:
         "count_beam": b["count_beam"], "count_weight": b["count_weight"],
         "gross_g": round(b["gross_g"] or 0.0, 1),
         "confidence": b["confidence"], "reason": b["reason"],
+        "vision_ref": b["vision_ref"], "id_confidence": b["id_confidence"],
         "locked_by": b["locked_by"], "lock_expires_sim": b["lock_expires_sim"],
     }
 
@@ -213,7 +214,11 @@ def snapshot() -> dict:
     by_ref = []
     for art in DB.rows(con, "SELECT * FROM articles ORDER BY ref"):
         mine = [v for v in views if v["ref"] == art["ref"]]
-        ready = [v for v in mine if v["state"] == "READY"]
+        # A box tagged to someone else's production batch is not general
+        # stock (finding: it used to count toward "ready" here even though
+        # fifo_allocate/reserve() already refuse to hand it to a new
+        # demand -- the KPI and the actual allocation must agree).
+        ready = [v for v in mine if v["state"] == "READY" and not v["batch_id"]]
         ready.sort(key=E.fifo_key)
         by_ref.append({
             "ref": art["ref"], "label": art["label"], "color": art["color"],
@@ -328,9 +333,10 @@ def event(kind: str, payload: dict) -> None:
 
 def store_box(barcode_id: str, gross_g: float, source: str,
              t_c: float | None = None, rh: float | None = None,
-             fw: str | None = None, batch_id: str | None = None) -> dict:
+             fw: str | None = None, batch_id: str | None = None,
+             vision: dict | None = None) -> dict:
     res = W.create_box(con, clock.t_sim, barcode_id, gross_g, source,
-                       t_c, rh, fw, batch_id=batch_id)
+                       t_c, rh, fw, batch_id=batch_id, vision=vision)
     STATE["crane"] = {"cmd": "store", "box_id": res["box_id"],
                       "slot_id": res["slot"]["slot_id"] if res.get("slot") else None,
                       "seq": STATE["crane"]["seq"] + 1}
@@ -362,6 +368,17 @@ async def loop_clock() -> None:
         try:
             now = clock.tick()
             cured = W.sweep_cured(con, now)
+            if cured:
+                # Criterion 4 names this moment explicitly ("passage du
+                # seuil 24 h") -- it must be visible on the dashboard the
+                # instant it happens, not just inferable from the state
+                # column on the next poll.
+                STATE["banner"] = {
+                    "kind": "ok",
+                    "text": "%s pret (24 h de sechage atteintes)"
+                           % (cured[0] if len(cured) == 1
+                              else "%d box" % len(cured)),
+                    "t_sim": now}
             expired = W.sweep_expired(con, now)
             for e in expired:
                 if STATE["last_order"] and STATE["last_order"].get("order_id") == e["order_id"]:
@@ -370,8 +387,15 @@ async def loop_clock() -> None:
                     "kind": "quarantine",
                     "text": "%s expiree: reservation non confirmee a temps"
                            % e["order_id"], "t_sim": now}
+            shipped = W.auto_ship_ready_batches(con, now)
+            for s in shipped:
+                STATE["banner"] = {
+                    "kind": "ok",
+                    "text": "%s expedie automatiquement: %d noyaux"
+                           % (s["order_id"], s.get("qty_allocated", 0)),
+                    "t_sim": now}
             tick_n += 1
-            if cured or expired or tick_n % 25 == 0:   # ~every 5 real seconds
+            if cured or expired or shipped or tick_n % 25 == 0:   # ~every 5 real seconds
                 W.checkpoint_clock(con, now, clock.speed)
         except Exception as exc:                        # pragma: no cover
             print("[loop_clock] error (continuing): %s" % exc)
@@ -449,8 +473,9 @@ async def handle_box_done(payload: dict) -> None:
         _last_unsolicited = (fp, now_mono)
 
     batch_id = _arrival_window.get("batch_id") if _arrival_window else None
+    vision = _arrival_window.get("vision") if _arrival_window else None
     res = store_box(barcode_id, gross_g, source="esp32", t_c=t_c, rh=rh, fw=fw,
-                    batch_id=batch_id)
+                    batch_id=batch_id, vision=vision)
 
     if verdict["action"] == "resolve_window" and _arrival_window is not None:
         _arrival_window["status"] = "RESOLVED_L0"
@@ -538,11 +563,22 @@ async def run_arrival(barcode_id: str, qty: int, anomaly: str = "none",
         if bc["used_by_box"]:
             return {"error": "barcode already used: %s" % barcode_id}
 
-        frames = PLANT.build_arrival(bc["unit_mass_g"], qty, anomaly)
+        art = DB.one(con, "SELECT * FROM articles WHERE ref=?", (bc["ref"],))
+        all_articles = DB.rows(con, "SELECT * FROM articles")
+        swap = (PLANT.pick_swap_article(art, all_articles)
+               if anomaly == "mismatch" and art else None)
+        frames = PLANT.build_arrival(
+            bc["unit_mass_g"], qty, anomaly,
+            swap_unit_mass_g=(swap["unit_mass_g"] if swap else None))
+        # The simulated vision station's own reading (criterion 2), taken
+        # once for this arrival -- independent of whichever path (L0/L1)
+        # ends up resolving the weight, so it must agree with `swap` above:
+        # the same physical wrong reference the scale also weighed.
+        vision = PLANT.simulate_vision(art, qty, anomaly, all_articles) if art else None
         my_epoch = _epoch
         _arrival_window = {"barcode_id": barcode_id, "status": "OPEN",
                            "resolved_at": None, "box_id": None,
-                           "batch_id": batch_id}
+                           "batch_id": batch_id, "vision": vision}
 
         # Still the wire field name "ref" (firmware-compatibility: the board
         # only ever echoes this string back, never parses it) -- its content
@@ -572,7 +608,7 @@ async def run_arrival(barcode_id: str, qty: int, anomaly: str = "none",
         gross = PLANT.final_gross_g(frames)
         res = store_box(barcode_id, gross, source="L1",
                         t_c=STATE["env"]["t_c"], rh=STATE["env"]["rh"],
-                        batch_id=batch_id)
+                        batch_id=batch_id, vision=vision)
         _arrival_window["status"] = "RESOLVED_L1"
         _arrival_window["resolved_at"] = time.monotonic()
         _arrival_window["box_id"] = res["box_id"]
@@ -830,6 +866,58 @@ async def api_cancel(body: dict):
         return JSONResponse({"error": e.message}, e.code)
     if STATE["last_order"] and STATE["last_order"].get("order_id") == oid:
         STATE["last_order"] = None
+    await broadcast()
+    return res
+
+
+@app.post("/api/box/{box_id}/archive")
+async def api_box_archive(box_id: str):
+    """Close out a QUARANTINE/EMPTY box for good (contract 1.7) -- quarantine
+    used to be a dead end with no endpoint that ever touched it again."""
+    try:
+        res = W.archive_box(con, clock.t_sim, box_id)
+    except W.OpError as e:
+        return JSONResponse({"error": e.message}, e.code)
+    await broadcast()
+    return res
+
+
+@app.post("/api/box/{box_id}/recount")
+async def api_box_recount(body: dict, box_id: str):
+    """Re-present a QUARANTINED box's evidence (a re-weigh, and optionally a
+    re-scan under the vision station) instead of leaving it stuck forever
+    (contract 1.7). Body: `{"gross_g": 9420.5}`, optionally
+    `{"anomaly": "none"}` to re-run the plant model's vision simulation for
+    a fresh camera reading (omit for a plain re-weigh with no new vision
+    evidence)."""
+    try:
+        gross_g = float(body.get("gross_g", 0))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "gross_g must be a number"}, 400)
+    vision = None
+    if "anomaly" in body:
+        b = DB.one(con, "SELECT * FROM boxes WHERE box_id=?", (box_id,))
+        bc = DB.one(con, "SELECT * FROM barcodes WHERE barcode_id=?",
+                    (b["code"] if b else None,))
+        art = DB.one(con, "SELECT * FROM articles WHERE ref=?",
+                    (bc["ref"],)) if bc else None
+        if art and bc:
+            all_articles = DB.rows(con, "SELECT * FROM articles")
+            # `qty` defaults to this box's OWN weight-derived estimate, not
+            # 0 -- a caller that asks for a fresh vision reading without
+            # naming a quantity must not accidentally hand the simulator
+            # "0 cores", which would fabricate a huge, spurious count
+            # mismatch against the real weight and quarantine an otherwise
+            # good recount.
+            qty = body.get("qty")
+            if qty is None:
+                qty = E.count_from_weight(gross_g, bc["unit_mass_g"])
+            vision = PLANT.simulate_vision(art, int(qty),
+                                           body.get("anomaly", "none"), all_articles)
+    try:
+        res = W.recount_box(con, clock.t_sim, box_id, gross_g, vision=vision)
+    except W.OpError as e:
+        return JSONResponse({"error": e.message}, e.code)
     await broadcast()
     return res
 

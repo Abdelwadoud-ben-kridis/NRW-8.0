@@ -82,6 +82,127 @@ def test_each_barcode_carries_its_own_unit_mass():
     assert r["accepted"] and r["quantity"] == 37
 
 
+# --- criterion 2: vision identification cross-check (contract 1.7) ----------
+
+SHAPE_114 = {"ref": "NY-114", "len_mm": 120.0, "wid_mm": 85.0, "h_mm": 50.0, "holes": 2}
+SHAPE_220 = {"ref": "NY-220", "len_mm": 150.0, "wid_mm": 110.0, "h_mm": 70.0, "holes": 3}
+CATALOGUE = [SHAPE_114, SHAPE_220]
+
+
+def test_identify_core_matches_the_true_shape():
+    vision = {"len_mm": 121.0, "wid_mm": 84.0, "h_mm": 51.0, "holes": 2}
+    r = E.identify_core(vision, CATALOGUE)
+    assert r["ref"] == "NY-114" and r["confidence"] == "HAUTE"
+
+
+def test_identify_core_holes_mismatch_lowers_confidence():
+    # Same overall size as NY-114, but the wrong core-print count -- a
+    # camera reads holes exactly, so a hole-count mismatch on an otherwise
+    # perfect size match must not still read as a confident, clean match.
+    vision = {"len_mm": 120.0, "wid_mm": 85.0, "h_mm": 50.0, "holes": 3}
+    r = E.identify_core(vision, CATALOGUE)
+    assert r["confidence"] == "NULLE"
+
+
+def test_mismatch_is_quarantined_regardless_of_quantity():
+    # Weight alone can coincidentally land on a clean multiple of the wrong
+    # reference's mass for SOME quantities (finding: 1 in 4 slipped through
+    # before vision existed) -- vision must catch every one of them, for
+    # every quantity, because it doesn't depend on the weight arithmetic at
+    # all.
+    for qty in range(1, 81):
+        gross = E.TARE_G + qty * 206.0     # a clean NY-114 weight
+        r = E.assess_box(BARCODE, ART, gross, vision_ref="NY-220")
+        assert not r["accepted"] and r["state"] == "QUARANTINE", qty
+        assert "vision" in r["reason"]
+
+
+def test_vision_agreement_rescues_a_noisy_but_honest_box():
+    # A large, real box drifts past the tight zero-vision tolerance on
+    # honest per-core variance alone (finding: 25-60% of good boxes at
+    # realistic noise) -- an independent vision count that agrees within one
+    # core RESCUES it instead of quarantining a perfectly good box.
+    unit = 206.0
+    count = 40
+    noisy_gross = E.TARE_G + count * unit * 1.02   # +2% -- outside 0.12*unit alone
+    r = E.assess_box(BARCODE, ART, noisy_gross, vision_ref="NY-114", vision_count=count)
+    assert r["accepted"] and r["confidence"] == "MOYENNE"
+    assert r["quantity"] == count
+
+
+def test_vision_and_weight_disagreeing_a_lot_is_quarantined():
+    r = E.assess_box(BARCODE, ART, E.TARE_G + 37 * 206.0,
+                     vision_ref="NY-114", vision_count=30)
+    assert not r["accepted"] and r["state"] == "QUARANTINE"
+
+
+def test_realistic_core_variance_rarely_quarantines_an_honest_box():
+    # Regression guard for the finding that a fixed absolute tolerance with
+    # no second sensor quarantined 25-60% of honest boxes under realistic
+    # ~3% per-core mass variance. With the vision count as a second,
+    # independent measurement, the false-quarantine rate on ordinary
+    # arrivals must stay low (some MOYENNE-confidence undercounts by a core
+    # or two are an accepted, disclosed trade-off -- an outright wrongful
+    # quarantine is not).
+    import random as _random
+    from backend import db as _db
+    from backend import plant as _plant
+    articles = [{"ref": r[0], "unit_mass_g": r[2], "tolerance_g": r[3],
+                "len_mm": r[4], "wid_mm": r[5], "h_mm": r[6], "holes": r[7]}
+               for r in _db.ARTICLES]
+    _random.seed(1234)
+    quarantined = 0
+    n = 800
+    for _ in range(n):
+        art = _random.choice(articles)
+        qty = _random.randint(1, 80)
+        bc = {"barcode_id": "BC-X", "ref": art["ref"], "unit_mass_g": art["unit_mass_g"]}
+        frames = _plant.build_arrival(art["unit_mass_g"], qty, "none")
+        gross = _plant.final_gross_g(frames)
+        vision = _plant.simulate_vision(art, qty, "none", articles)
+        idv = E.identify_core(vision, articles)
+        vref = idv["ref"] if idv["confidence"] != "NULLE" else None
+        r = E.assess_box(bc, art, gross, vision_ref=vref,
+                         vision_count=vision.get("count_visible"))
+        if not r["accepted"]:
+            quarantined += 1
+    assert quarantined / n < 0.02, "%d/%d honest boxes wrongly quarantined" % (quarantined, n)
+
+
+def test_mismatch_anomaly_is_caught_end_to_end_for_every_quantity():
+    # Full pipeline (plant model -> identify_core -> assess_box), not just
+    # assess_box in isolation -- every quantity 1..80, every reference,
+    # must be quarantined for a "mismatch" arrival (finding: weight alone
+    # missed 1 case in 4 for specific quantities that happened to round
+    # onto a clean multiple of the wrong reference's mass).
+    from backend import db as _db
+    from backend import plant as _plant
+    articles = [{"ref": r[0], "unit_mass_g": r[2], "tolerance_g": r[3],
+                "len_mm": r[4], "wid_mm": r[5], "h_mm": r[6], "holes": r[7]}
+               for r in _db.ARTICLES]
+    for art in articles:
+        for qty in range(1, 81):
+            bc = {"barcode_id": "BC-X", "ref": art["ref"], "unit_mass_g": art["unit_mass_g"]}
+            swap = _plant.pick_swap_article(art, articles)
+            frames = _plant.build_arrival(art["unit_mass_g"], qty, "mismatch",
+                                          swap_unit_mass_g=swap["unit_mass_g"])
+            gross = _plant.final_gross_g(frames)
+            vision = _plant.simulate_vision(art, qty, "mismatch", articles)
+            idv = E.identify_core(vision, articles)
+            vref = idv["ref"] if idv["confidence"] != "NULLE" else None
+            r = E.assess_box(bc, art, gross, vision_ref=vref,
+                             vision_count=vision.get("count_visible"))
+            assert not r["accepted"], (art["ref"], qty, r)
+
+
+def test_quarantine_can_re_enter_drying_on_a_successful_recount():
+    # contract 1.7: quarantine is no longer a dead end for a box whose
+    # barcode is still known and valid.
+    assert E.can_transition("QUARANTINE", "DRYING")
+    assert E.can_transition("QUARANTINE", "ARCHIVED")
+    assert not E.can_transition("QUARANTINE", "READY")
+
+
 # --- criteria 5 + 6: FIFO and automatic proposal ------------------------------
 
 def test_fifo_picks_oldest_first():
@@ -120,16 +241,44 @@ def test_multi_box_allocation_and_shortfall():
     assert any(x["reason"] == "plus recent (FIFO)" for x in r["rejected"])
 
 
-def test_allocation_never_splits_a_box():
-    # 25 needed; the oldest box only has 22, so covering the order requires
-    # taking BOX-2's entire 18 too -- overshooting to 40 rather than
-    # splitting BOX-2 to hand out exactly 25.
+def test_allocation_splits_only_the_last_box_needed():
+    # 25 needed; the oldest box has 22 (taken whole), and only 3 of BOX-2's
+    # 18 are needed to close the gap (contract 1.7: FIFO picks are partial,
+    # reversing 1.3) -- the remaining 15 stay in BOX-2, READY, at its
+    # original t_in_sim, so it is still first in line next time.
     boxes = [_box("BOX-1", "NY-114", 1 * H, "READY", qty=22),
              _box("BOX-2", "NY-114", 5 * H, "READY", qty=18)]
     r = E.fifo_allocate(boxes, "NY-114", 25, 100 * H)
-    assert [p["take"] for p in r["picks"]] == [22, 18]
-    assert all(p["partial"] is False for p in r["picks"])
-    assert r["qty_allocated"] == 40 and r["shortfall"] == 0
+    assert [p["take"] for p in r["picks"]] == [22, 3]
+    assert r["picks"][0]["partial"] is False
+    assert r["picks"][1]["partial"] is True
+    assert r["qty_allocated"] == 25 and r["shortfall"] == 0
+
+
+def test_batch_tagged_boxes_are_not_general_stock():
+    # A box already produced FOR another order's production batch must not
+    # be stealable by a fresh demand (finding: it used to be, and the batch
+    # then shipped short with no warning).
+    boxes = [_box("BOX-1", "NY-114", 1 * H, "DRYING", batch_id="ORD-9"),
+             _box("BOX-2", "NY-114", 5 * H, "READY")]
+    r = E.fifo_allocate(boxes, "NY-114", 5, 100 * H)
+    assert r["picks"][0]["box_id"] == "BOX-2"
+    assert any(x["box_id"] == "BOX-1" and x["reason"] == "reserve au lot"
+              for x in r["rejected"])
+
+
+def test_impossible_allocation_reports_an_eta_when_the_pipeline_can_close_it():
+    boxes = [_box("BOX-1", "NY-114", 0.0, "READY", qty=5),
+             _box("BOX-2", "NY-114", 10 * H, "DRYING", qty=20, req=24.0)]
+    r = E.fifo_allocate(boxes, "NY-114", 20, 12 * H)
+    assert r["status"] == "IMPOSSIBLE"
+    assert r["eta_sim"] == 10 * H + 24.0 * H
+
+
+def test_impossible_allocation_has_no_eta_when_the_pipeline_cannot_close_it():
+    boxes = [_box("BOX-1", "NY-114", 0.0, "READY", qty=5)]
+    r = E.fifo_allocate(boxes, "NY-114", 40, 12 * H)
+    assert r["status"] == "IMPOSSIBLE" and r["eta_sim"] is None
 
 
 def test_insufficient_total_stock_refuses_the_whole_reservation():

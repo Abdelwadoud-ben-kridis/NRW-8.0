@@ -70,7 +70,8 @@ export const EN = {
   stageSub: "derived from ESP32 state, crane command and last order",
 
   // --- ESP32 instrument panel -----------------------------------------------
-  liveEsp32: "Live ESP32", beamCount: "cores (beam)", grossMass: "gross mass",
+  liveEsp32: "Live ESP32", beamCount: "cores (beam)", visionRef: "vision id",
+  grossMass: "gross mass",
   stable: "stable", unstable: "settling", lastSeen: "last seen",
   fw: "firmware", noSignalYet: "no telemetry yet",
   esp32St: { IDLE: "IDLE", COUNTING: "COUNTING", STABILIZING: "STABILIZING",
@@ -87,7 +88,7 @@ export const EN = {
   // --- quarantine ----------------------------------------------------------
   quarantineModule: "Quarantine", quarantineNone: "no boxes in quarantine",
   unknownRef: "UNKNOWN REFERENCE", netMass: "Net mass", perCore: "Per core",
-  gap: "Gap",
+  gap: "Gap", recount: "Re-weigh", archive: "Archive",
 
   // --- rack / slot inspector -----------------------------------------------
   rackView: "RACK", twinView: "3D TWIN", rackTitle: "Warehouse rack — 306 slots",
@@ -120,6 +121,9 @@ export const EN = {
     box_done_ignored: "duplicate ignored", box_done_invalid: "invalid message",
     arrival_fallback: "L1 fallback", system_reset: "reset",
     scenario_loaded: "scenario loaded",
+    batch_opened: "batch opened", batch_shipped: "batch shipped",
+    batch_cancelled: "batch cancelled", barcode_registered: "barcode registered",
+    box_archived: "archived", box_recount: "re-weighed",
   },
   // The decision engine authors its rejection vocabulary in French (it is
   // P2's territory and algo/test_engine.py asserts on the exact strings), so
@@ -136,6 +140,7 @@ export const EN = {
     "indisponible": "unavailable",
     "plus recent (FIFO)": "newer (FIFO)",
     "stock insuffisant": "not enough stock",
+    "reserve au lot": "held for a production batch",
   },
   det: {
     "pas encore stocke": "not stored yet",
@@ -153,6 +158,13 @@ export const EN = {
     `net mass ${net} g doesn't match barcode ${code} (${unit} g/core expected, gap ${gap} g)`,
   detUnknownBarcode: (id) => `unregistered barcode: ${id}`,
   detReusedBarcode: (id) => `barcode already used by ${id}`,
+  detVisionMismatch: (seen, code, declared) =>
+    `vision sees reference ${seen}, but barcode ${code} declares ${declared}`,
+  detCountGap: (weight, vision) =>
+    `count disagreement: scale says ${weight}, vision sees ${vision} cores`,
+  partialPick: "partial", partialPickHint: "remainder stays in stock, same age",
+  etaNone: "no estimate — nothing left curing for this reference",
+  etaHint: (clockLabel) => `enough will be ready by ${clockLabel}`,
 };
 
 export const FR = {
@@ -225,7 +237,8 @@ export const FR = {
   stageSub: "déduit de l'état ESP32, de la commande du pont et de la commande en cours",
 
   // --- ESP32 instrument panel -----------------------------------------------
-  liveEsp32: "ESP32 en direct", beamCount: "noyaux (barrière)", grossMass: "masse brute",
+  liveEsp32: "ESP32 en direct", beamCount: "noyaux (barrière)", visionRef: "identification vision",
+  grossMass: "masse brute",
   stable: "stable", unstable: "stabilisation", lastSeen: "vu pour la dernière fois",
   fw: "firmware", noSignalYet: "pas encore de télémétrie",
   esp32St: { IDLE: "INACTIF", COUNTING: "COMPTAGE", STABILIZING: "STABILISATION",
@@ -242,7 +255,7 @@ export const FR = {
   // --- quarantine ----------------------------------------------------------
   quarantineModule: "Quarantaine", quarantineNone: "aucun box en quarantaine",
   unknownRef: "RÉFÉRENCE INCONNUE", netMass: "Masse nette", perCore: "Par noyau",
-  gap: "Écart",
+  gap: "Écart", recount: "Repeser", archive: "Archiver",
 
   // --- rack / slot inspector -----------------------------------------------
   rackView: "RACK", twinView: "JUMEAU 3D", rackTitle: "Rack de l'entrepôt — 306 emplacements",
@@ -274,6 +287,9 @@ export const FR = {
     box_done_ignored: "doublon ignoré", box_done_invalid: "message invalide",
     arrival_fallback: "repli L1", system_reset: "réinitialisation",
     scenario_loaded: "scénario chargé",
+    batch_opened: "lot ouvert", batch_shipped: "lot expédié",
+    batch_cancelled: "lot annulé", barcode_registered: "code-barre enregistré",
+    box_archived: "archivé", box_recount: "repesé",
   },
   // In FR the engine's own wording is already correct — this map only
   // restores the accents it cannot carry through MQTT/SQLite safely.
@@ -288,6 +304,7 @@ export const FR = {
     "indisponible": "indisponible",
     "plus recent (FIFO)": "plus récent (FIFO)",
     "stock insuffisant": "stock insuffisant",
+    "reserve au lot": "réservé à un lot de production",
   },
   det: {
     "pas encore stocke": "pas encore stocké",
@@ -305,6 +322,13 @@ export const FR = {
     `masse nette ${net} g incompatible avec le code-barre ${code} (${unit} g/noyau attendu, écart ${gap} g)`,
   detUnknownBarcode: (id) => `code-barre non enregistré : ${id}`,
   detReusedBarcode: (id) => `code-barre déjà utilisé par ${id}`,
+  detVisionMismatch: (seen, code, declared) =>
+    `la vision détecte la référence ${seen}, mais le code-barre ${code} annonce ${declared}`,
+  detCountGap: (weight, vision) =>
+    `écart de comptage : pesée ${weight}, vision ${vision} noyaux`,
+  partialPick: "partiel", partialPickHint: "le reste reste en stock, même ancienneté",
+  etaNone: "aucune estimation — plus rien en séchage pour cette référence",
+  etaHint: (clockLabel) => `assez sera prêt à ${clockLabel}`,
 };
 
 // Runtime language switch (dashboard/app.js's language toggle button), kept

@@ -27,8 +27,8 @@ from backend import config as C
 
 import paho.mqtt.client as mqtt
 
-DEBOUNCE_S = 0.04
 STABLE_S = 1.2
+STABLE_S_FINAL = 0.25    # shorter wait once the conveyor said "final" (contract 1.7)
 STABLE_BAND_G = 25.0
 
 
@@ -39,19 +39,17 @@ class FakeEsp32:
         self.ref = "NY-114"
 
     def reset(self) -> None:
-        self.count = 0
         self.tare_g = 0.0
         self.gross_g = 0.0
         self.tared = False
         self.stable = False
-        self.last_beam = 1
-        self.last_edge = 0.0
+        self.saw_final = False
         self.stable_since = time.monotonic()
         self.last_mass = 0.0
         self.done_sent = False
 
     # --- identical logic to firmware/sketch.ino ---------------------------
-    def on_raw(self, beam: int, load_mv: float, client) -> None:
+    def on_raw(self, load_mv: float, final: bool, client) -> None:
         now = time.monotonic()
         mass = load_mv * C.G_PER_MV
 
@@ -66,18 +64,19 @@ class FakeEsp32:
             return
 
         self.gross_g = mass
+        if final:
+            self.saw_final = True
 
-        if self.last_beam == 1 and beam == 0 and now - self.last_edge > DEBOUNCE_S:
-            self.count += 1
-            self.last_edge = now
-        self.last_beam = beam
-
-        # Weight is the only sensor now (contract 1.5 -- identification moved
-        # to a barcode scan upstream of this stand-in); no beam count gate.
+        # Weight is the only sensor (contract 1.5/1.7 -- identification and
+        # the second count come from a barcode scan and a simulated vision
+        # station upstream of this stand-in). `final` (from the plant
+        # model's last raw frame) shortens the settle wait instead of
+        # relying purely on a timeout that ordinary MQTT jitter could clip.
+        need = STABLE_S_FINAL if self.saw_final else STABLE_S
         if abs(mass - self.last_mass) > STABLE_BAND_G:
             self.stable_since = now
             self.stable = False
-        elif now - self.stable_since > STABLE_S:
+        elif now - self.stable_since > need:
             if not self.stable:
                 self.stable = True
                 self.publish_done(client)
@@ -87,9 +86,8 @@ class FakeEsp32:
         if self.done_sent:
             return
         self.done_sent = True
-        payload = {"ref": self.ref, "count_beam": self.count,
-                   "gross_g": round(self.gross_g, 1),
-                   "t_c": self.t_c, "rh": self.rh, "fw": "fake-1.0"}
+        payload = {"ref": self.ref, "gross_g": round(self.gross_g, 1),
+                   "t_c": self.t_c, "rh": self.rh, "fw": "fake-1.1"}
         client.publish(C.T_BOX_DONE, json.dumps(payload))
         print("[box_done] %s" % payload)
         self.reset()
@@ -98,7 +96,7 @@ class FakeEsp32:
         return json.dumps({
             "state": ("STABILIZING" if self.stable else
                       "COUNTING" if self.tared else "IDLE"),
-            "count_beam": self.count, "gross_g": round(self.gross_g, 1),
+            "gross_g": round(self.gross_g, 1),
             "stable": self.stable, "t_c": self.t_c, "rh": self.rh,
             "up_ms": int(time.monotonic() * 1000), "src": "fake"})
 
@@ -120,7 +118,7 @@ def on_message(client, _u, msg):
     if msg.topic == C.T_RAW:
         if d.get("t_c") is not None:
             dev.t_c, dev.rh = d["t_c"], d["rh"]
-        dev.on_raw(int(d.get("beam", 1)), float(d.get("load_mv", 0)), client)
+        dev.on_raw(float(d.get("load_mv", 0)), bool(d.get("final", False)), client)
     elif msg.topic == C.T_CMD:
         cmd = d.get("cmd")
         if cmd == "start_box":

@@ -150,12 +150,15 @@ def run_checks(con, now_sim: float | None = None) -> dict:
                        "QUARANTINE boxes have a reason, no slot, no lock"
                        if not bad else "%d QUARANTINE boxes are malformed" % len(bad), bad))
 
-    # --- B6: NULL article_ref only in QUARANTINE -----------------------------
+    # --- B6: NULL article_ref only in QUARANTINE (or an ARCHIVED box that
+    # started life as an unknown-barcode QUARANTINE and was closed out
+    # without ever being identified -- contract 1.7's archive_box) ----------
     bad = [b["box_id"] for b in boxes
-           if b["article_ref"] is None and b["state"] != "QUARANTINE"]
+           if b["article_ref"] is None and b["state"] not in ("QUARANTINE", "ARCHIVED")]
     checks.append(_row("B6", "PASS" if not bad else "FAIL",
-                       "article_ref is NULL only for QUARANTINE boxes" if not bad
-                       else "%d non-quarantine boxes have no article" % len(bad), bad))
+                       "article_ref is NULL only for QUARANTINE/ARCHIVED boxes"
+                       if not bad else
+                       "%d boxes have no article outside quarantine/archive" % len(bad), bad))
 
     # --- T1: fixed cure -------------------------------------------------------
     bad = [b["box_id"] for b in boxes
@@ -274,6 +277,19 @@ def run_checks(con, now_sim: float | None = None) -> dict:
                        if not orphan_batch else
                        "%d boxes reference an unknown batch order" % len(orphan_batch),
                        orphan_batch))
+
+    # --- O5: a batch box is never handed to a DIFFERENT order (contract 1.7)
+    # `fifo_allocate` excludes batch_id boxes from general stock entirely, so
+    # this should be structurally impossible -- this check is the mechanical
+    # proof, not just a design intent (finding: this used to be reachable
+    # via reserve(), which is exactly the bug contract 1.7 closed).
+    stolen_batch = [b["box_id"] for b in boxes
+                   if b["batch_id"] and b["state"] == "RESERVED"]
+    checks.append(_row("O5", "PASS" if not stolen_batch else "FAIL",
+                       "no box held for a production batch is ever RESERVED "
+                       "by another order" if not stolen_batch else
+                       "%d batch boxes were reserved by another order" % len(stolen_batch),
+                       stolen_batch))
 
     known_refs = {a["ref"] for a in DB.rows(con, "SELECT ref FROM articles")}
     unknown_ref = [o["order_id"] for o in orders if o["ref"] not in known_refs]

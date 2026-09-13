@@ -50,8 +50,8 @@ python tools/fake_device.py
 
 | # | Task (CDC §4) | Points | Where it is |
 |---|----------------|--------|-------------|
-| 1 | Identify the core / its model | 15 | a barcode scan (`backend/warehouse.py::register_barcode`/`create_box`) — a lookup, not a guess |
-| 2 | Deduce the quantity | 15 | `algo/engine.py::assess_box` — net weight ÷ that barcode's own registered per-noyau mass |
+| 1 | Identify the core / its model | 15 | a barcode scan (`backend/warehouse.py::register_barcode`/`create_box`) cross-checked against a simulated vision station's shape reading (`algo/engine.py::identify_core`) — two independent sensors, not a guess |
+| 2 | Deduce the quantity | 15 | `algo/engine.py::assess_box` — net weight ÷ that barcode's own registered per-noyau mass, cross-checked against the vision station's own visible-core count |
 | 3 | Register a new box, automatic timestamp | — | `backend/warehouse.py::create_box`, `t_in_sim` |
 | 4 | Track drying, ready / not ready at 24 h | 10 | `engine.required_cure_h` (fixed 24 h, contract 1.2) + the `sweep_cured` tick |
 | 5 | Classify and locate by type, quantity, storage date | 15 | `by_ref` panel + `slots` table + inventory `AGE` column |
@@ -122,15 +122,15 @@ Three rules hold the whole thing together:
 1. **The ESP32 is never told the answer.** It receives a raw millivolt
    reading. It tares, waits for the mass to settle, and reports the reading
    itself — identification (which reference, and that specific box's own
-   per-noyau weight) comes from a barcode scan upstream of the board, and
-   the resulting count is computed in `algo/engine.py`, not on the board.
-   That separation is what makes criterion 9 defensible when a juror pushes
-   on it.
+   per-noyau weight) comes from a barcode scan and a simulated vision
+   station upstream of the board, and the resulting count is computed and
+   cross-checked in `algo/engine.py`, not on the board. That separation is
+   what makes criterion 9 defensible when a juror pushes on it.
 2. **No wall-clock timestamps, anywhere.** Everything is `t_sim` in seconds.
    One `datetime.now()` in the database and the 24-hour demo stops working.
 3. **All decisions live in `algo/engine.py`,** which imports nothing and does
-   no I/O. That is why it has 31 unit tests that run in well under a second,
-   and why you can answer "what would happen if…" on a whiteboard.
+   no I/O. That is why it has 40+ unit tests that run in well under a
+   second, and why you can answer "what would happen if…" on a whiteboard.
 
 ---
 
@@ -146,7 +146,7 @@ scw/
 │   └── database-guide.md   how to browse/query scw.db: DB Explorer, sqlite3, Python
 ├── algo/
 │   ├── engine.py           every decision. No I/O. ~450 lines.
-│   └── test_engine.py      31 tests, one per scored behaviour
+│   └── test_engine.py      40+ tests, one per scored behaviour
 ├── backend/
 │   ├── config.py           SESSION, broker, rack geometry, physics constants
 │   ├── db.py               schema, seeding, transactions, 306-slot rack generation
@@ -170,8 +170,10 @@ scw/
 │                           separate CAD project can export them (§5)
 ├── firmware/
 │   ├── sketch.ino          ESP32 — same file for Wokwi and the real board
-│   ├── diagram.json        Wokwi wiring
-│   └── libraries.txt       PubSubClient · ArduinoJson · DHT sensor library
+│   ├── diagram.json        Wokwi wiring — pot (load cell stand-in), DHT22,
+│   │                       an SSD1306 OLED status display, done button
+│   └── libraries.txt       PubSubClient · ArduinoJson · DHT sensor library ·
+│                           Adafruit GFX Library · Adafruit SSD1306
 └── tools/
     ├── fake_device.py          Python ESP32 stand-in, byte-identical payloads
     ├── smoke.py                REST end-to-end checks against a running backend
@@ -238,9 +240,10 @@ at the part's own mounting point.
 1. Open [wokwi.com](https://wokwi.com) → new ESP32 project.
 2. Paste `firmware/diagram.json` into the **diagram.json** tab.
 3. Paste `firmware/sketch.ino` into **sketch.ino**.
-4. Library Manager → add the three from `libraries.txt`.
+4. Library Manager → add the five from `libraries.txt`.
 5. Check `SESSION` matches `backend/config.py`. Start the simulation.
-6. The ESP32 pill in the dashboard turns green. Press **A**.
+6. The ESP32 pill in the dashboard turns green, and the OLED shows
+   `SCW booting...` then `TARE...`. Press **A**.
 
 Wokwi's `Wokwi-GUEST` network needs no password. For P5's real board, change
 the SSID/password in `setup()` and nothing else — same firmware, same topics.
@@ -250,7 +253,7 @@ the SSID/password in `setup()` and nothing else — same firmware, same topics.
 ## 7. Testing
 
 ```bash
-python algo/test_engine.py      # 31 unit tests, no server needed
+python algo/test_engine.py      # 40+ unit tests, no server needed
 python tools/test_backend.py    # 14 DB integration tests (throwaway SQLite
                                  # files), no server needed
 python tools/smoke.py           # end-to-end checks, backend must be running
@@ -265,10 +268,12 @@ python tools/l0_probe.py        # proves the LIVE device path (L0), not just
 `smoke.py` walks the exact demo path: two boxes arrive five simulated hours
 apart, a demand before curing is refused **with reasons**, the clock jumps, the
 boxes cure on their own (always exactly 24 h — contract 1.2, no adaptive
-model), FIFO allocates across two boxes oldest-first, rounding up to both
-whole boxes rather than splitting one (contract 1.3 — a box is never left
-half-picked), both emptied boxes release their slots, an injected anomaly
-lands in quarantine, a double confirm deducts exactly once, an expired
+model), FIFO allocates across two boxes oldest-first, taking only what the
+demand needs and leaving the remainder READY in place (contract 1.7 —
+partial picks, reversing 1.3's whole-box-only rule), the fully-picked box
+releases its slot, an injected mismatch anomaly lands in quarantine
+(caught by the simulated vision station even when the weight alone would
+not have noticed), a double confirm deducts exactly once, an expired
 reservation cancels its order, an unknown reference is quarantined without
 polluting a real article, and the read-only consistency checker
 (`backend/consistency.py`, `GET /api/db/check`) reports `PASS`.
@@ -281,15 +286,17 @@ malformed or duplicate `box_done` published directly onto the MQTT topic.
 
 `test_firmware_contract.py` catches the one failure mode none of the above
 can: `sketch.ino` and `backend/config.py` silently drifting apart (scale
-calibration, session/broker defaults, required GPIOs, `box_done` fields) —
-they can't share an import, so nothing else keeps them in sync. `l0_probe.py`
-is the only one that proves the **live device path** — every other test/probe
-here runs with no device attached, so an arrival always resolves through the
-L1 backend fallback; `l0_probe.py` launches `fake_device.py` as the ESP32
-stand-in and checks that a nominal arrival and each anomaly (`none`,
-`mismatch`, `empty`) resolve in mode `L0` with the right verdict — weight is
-the only sensor now, so unlike the old beam-cross-check anomalies there is
-no case where L1 is the *correct* outcome any more.
+calibration, session/broker defaults, required GPIOs, `box_done` fields,
+the `final`-frame race fix) — they can't share an import, so nothing else
+keeps them in sync. `l0_probe.py` is the only one that proves the **live
+device path** — every other test/probe here runs with no device attached,
+so an arrival always resolves through the L1 backend fallback;
+`l0_probe.py` launches `fake_device.py` as the ESP32 stand-in and checks
+that a nominal arrival and each anomaly (`none`, `mismatch`, `empty`)
+resolve in mode `L0` with the right verdict — weight is the board's only
+sensor, and identification/the second count are cross-checked one layer up
+against the simulated vision station, so there is no case where L1 is the
+*correct* outcome any more.
 
 Run all six after every merge. Run them again at H23, before the feature
 freeze.
@@ -350,8 +357,13 @@ reverse, because 55 of the 160 points are things the jury has to *see happen*.
 - The cure requirement is a fixed 24 h for every box, every reference, every
   climate (contract 1.2) — no adaptive model. Temperature/RH are recorded on
   each box as arrival evidence and shown on the HMI, but never computed with.
-- Two independent counts. Agreement → HAUTE. Off by one → accepted at the lower
-  figure, MOYENNE. Off by two or more → quarantine, no guessing.
+- Two independent counts (the scale, and the simulated vision station).
+  Agreement → HAUTE. A gap of one or two → accepted at the lower figure,
+  MOYENNE. A gap of three or more, or vision naming a different reference
+  than the barcode → quarantine, no guessing.
 - FIFO is sorted on `(t_in_sim, box_id)`, with `box_id` compared as the
   number it encodes (`BOX-2` before `BOX-10`), so the same demand gives the
   same answer twice — which matters when the jury asks you to run it again.
+  Picks are partial (contract 1.7): a demand takes only what it needs from
+  the oldest box, and the remainder stays first in line, at its own
+  original timestamp, for the next one.

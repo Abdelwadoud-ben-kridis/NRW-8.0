@@ -82,11 +82,23 @@ if fw_port:
 m = re.search(r"void publishBoxDone\(\)\s*\{(.*?)\n\}", sketch, re.S)
 body = m.group(1) if m else ""
 check("publishBoxDone() found in sketch.ino", bool(m))
-for field in ("ref", "count_beam", "gross_g", "t_c", "rh", "fw"):
+# count_beam is gone from the wire payload (contract 1.7): weight is the
+# board's only sensor, the second count comes from the simulated vision
+# station upstream, not from anything this board reads.
+for field in ("ref", "gross_g", "t_c", "rh", "fw"):
     check('box_done includes "%s"' % field, ('d["%s"]' % field) in body)
+check("count_beam is NOT sent any more (contract 1.7)", 'count_beam' not in body)
+
+# The `final` marker (contract 1.7) is what closes the premature-publish
+# race: without it, sketch.ino can only guess a box is done from a
+# stability TIMEOUT, and ordinary MQTT jitter can clip the last core.
+check("onRaw() reads the `final` field off the raw frame",
+     'd["final"]' in sketch)
+check("a shorter STABLE_MS_FINAL exists for once `final` has arrived",
+     "STABLE_MS_FINAL" in sketch)
 
 # --- 4. wiring matches the judging requirement (real, legible pins) --------
-required_pins = {"PIN_BEAM": "25", "PIN_DONE": "26", "PIN_POT": "34",
+required_pins = {"PIN_DONE": "26", "PIN_POT": "34",
                  "PIN_LED": "2", "PIN_DHT": "15"}
 for name, pin in required_pins.items():
     got = find(r"#define\s+%s\s+(\d+)" % name, sketch, name)
@@ -105,7 +117,8 @@ def wired(a_suffix, b_suffix):
     return False
 
 
-check("diagram.json: beam button on esp:D25", wired("btnBeam:2.l", "esp:D25"))
+check("diagram.json: no leftover beam button wiring (contract 1.7)",
+     not wired("btnBeam:2.l", "esp:D25"))
 check("diagram.json: done button on esp:D26", wired("btnDone:2.l", "esp:D26"))
 check("diagram.json: potentiometer signal on esp:D34", wired("pot:SIG", "esp:D34"))
 check("diagram.json: DHT22 data on esp:D15", wired("dht:SDA", "esp:D15"))
@@ -114,6 +127,24 @@ check("diagram.json: LED driven from esp:D2 through the resistor",
 r1 = next((p for p in diagram["parts"] if p["id"] == "r1"), None)
 check("diagram.json: LED series resistor is 220 ohm",
       bool(r1) and r1["attrs"].get("value") == "220")
+
+# --- 5. OLED status display (criterion 9 polish) ---------------------------
+oled_part = next((p for p in diagram["parts"] if p["id"] == "oled"), None)
+check("diagram.json: an SSD1306 OLED part exists",
+     bool(oled_part) and oled_part.get("type") == "wokwi-ssd1306")
+check("diagram.json: OLED I2C address is 0x3c",
+     bool(oled_part) and oled_part["attrs"].get("i2cAddress") == "0x3c")
+check("diagram.json: OLED SDA on esp:D21 (default ESP32 I2C)",
+     wired("oled:SDA", "esp:D21"))
+check("diagram.json: OLED SCL on esp:D22 (default ESP32 I2C)",
+     wired("oled:SCL", "esp:D22"))
+check("sketch.ino includes the SSD1306 driver", "Adafruit_SSD1306.h" in sketch)
+check("sketch.ino initialises the OLED without blocking on failure",
+     "oled.begin(" in sketch and "g_oledOk" in sketch)
+
+libs = open(os.path.join(ROOT, "firmware", "libraries.txt"), encoding="utf-8").read()
+for lib in ("Adafruit GFX Library", "Adafruit SSD1306"):
+    check('libraries.txt lists "%s"' % lib, lib in libs)
 
 print("\n" + ("ALL GREEN" if not fails else "%d FAILURE(S): %s" % (len(fails), fails)))
 sys.exit(1 if fails else 0)

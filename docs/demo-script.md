@@ -29,11 +29,11 @@ never be empty when they arrive. Six boxes, 34 simulated hours, three cured.
 |---|------|--------------|----------------|
 | 1 | 0:40 | "A foundry core is sand, resin and catalyst. It must dry 24 hours before moulding. Today SOPAL tracks that zone by hand: plastic crates, no traceability. We turned it into a warehouse that sees, counts, remembers and decides." | nothing — let the 3D turn |
 | 2 | 0:40 | "This is the real 6 by 6 by 6 metre room. Single-aisle stacker crane, 2 faces, 9 columns, 17 levels: **306 slots**, 93 % of the floor length and 80 % of the height." | **1** iso, then **4** top, back to **1** |
-| 3 | 1:30 | "Before a box ever reaches the conveyor, a worker labels it and registers what it holds — a reference and that specific box's own per-noyau weight — right here in the dashboard. No one counts anything by hand; that registration is the only human input in the whole chain. The box arrives, its scanner reads the barcode back — a lookup, not a guess — then it loads onto the scale. That raw weight goes over MQTT to the ESP32 — **the board is never told the answer**, it just tares, waits for the mass to settle, and reports." | register a barcode, then **A** (box arrives) |
-| 4 | 0:50 | "Net weight ÷ that barcode's own registered per-noyau weight = 37, a clean division, so confidence HAUTE. The crane stores it and the clock starts — automatic timestamp, criterion 3." | point at the ESP32 pill, the new crate, and its barcode in the inventory row |
-| 5 | 1:00 | "Now the anomaly. Same barcode, but the physical cores don't match what it promised — swapped after labelling." → *pick "mismatch"* → "The weight doesn't line up with any clean multiple of the registered per-noyau mass, so it's **quarantined**. It never enters stock." | pick the anomaly, **A** |
-| 6 | 1:30 | "Production needs 60 NY-114." → press **D** → "The system proposes BOX-1 then BOX-3 — oldest first. And here is the part that matters: **it tells you what it refused and why**. BOX-5 is rejected, not because it is newer, but because it still needs 9 hours of drying. FIFO you can audit." | **D**, then **C** to confirm — **confirm before doing anything else**: a reservation auto-releases after 2 simulated hours (`LOCK_TTL_H`), and pressing **J** in beat 7 jumps +6 h, which would expire an unconfirmed order in full view of the jury |
-| 7 | 1:00 | "Two ideas for criterion 10. First: the system tells you not just what it will do, but **exactly why it refused everything else** — the FIFO rejected list, per box, per reason — and a built-in consistency checker (`/db`, the green PASS badge) proves the database itself is never in an inconsistent state, live, on demand. Second: when a demand can't be covered by existing stock at all — not just curing, genuinely absent — the system doesn't just refuse it. It opens a production batch, tracks it while it's made, and ships every box in it together the moment the last one finishes curing — no partial shipments, no manual bookkeeping." | **J** (+6 h) to show a DRYING box crossing to READY; open `/db` to show the consistency badge; press **D** for a reference with zero stock to show a batch open, then produce and ship it |
+| 3 | 1:30 | "Before a box ever reaches the conveyor, a worker labels it and registers what it holds — a reference and that specific box's own per-noyau weight — right here in the dashboard. No one counts anything by hand; that registration is the only human input in the whole chain. The box arrives, its scanner reads the barcode back — a lookup, not a guess — then it loads onto the scale AND passes a vision station: two independent sensors on the way in. That raw weight goes over MQTT to the ESP32 — **the board is never told the answer**, it just tares, waits for the mass to settle, and reports. Watch its own OLED — that's the board's own view of the same weighing, live." | register a barcode, then **A** (box arrives) — point at the Wokwi OLED as it moves TARE → WEIGHING → STABLE |
+| 4 | 0:50 | "Net weight ÷ that barcode's own registered per-noyau weight = 37, a clean division, and the vision station's own shape reading confirms it really is an NY-114 — confidence HAUTE on both identity and count. The crane stores it and the clock starts — automatic timestamp, criterion 3." | point at the ESP32 pill, the vision-id readout, the new crate, and its barcode in the inventory row |
+| 5 | 1:00 | "Now the anomaly. Same barcode, but the physical cores don't match what it promised — swapped after labelling." → *pick "mismatch"* → "Watch: even when the weight alone could coincidentally look clean for some quantities, the camera sees a shape that doesn't match this barcode's declared reference, so it's **quarantined** immediately. It never enters stock." | pick the anomaly, **A** |
+| 6 | 1:30 | "Production needs 60 NY-114." → press **D** → "The system proposes BOX-1, taking the rest it needs from BOX-3 — oldest first, and only what's needed: the leftover cores stay in stock, still first in line next time. And here is the part that matters: **it tells you what it refused and why**. BOX-5 is rejected, not because it is newer, but because it still needs 9 hours of drying — and if the pipeline can't cover it at all, the panel names exactly when it will." | **D**, then **C** to confirm — **confirm before doing anything else**: a reservation auto-releases after 2 simulated hours (`LOCK_TTL_H`), and pressing **J** in beat 7 jumps +6 h, which would expire an unconfirmed order in full view of the jury |
+| 7 | 1:00 | "Three ideas for criterion 10. First: the system tells you not just what it will do, but **exactly why it refused everything else** — the FIFO rejected list, per box, per reason — and a built-in consistency checker (`/db`, the green PASS badge) proves the database itself is never in an inconsistent state, live, on demand. Second: when a demand can't be covered by existing stock at all — not just curing, genuinely absent — the system doesn't just refuse it. It opens a production batch, tracks it, and **ships itself automatically** the moment the last box finishes curing — no partial shipments, no manual bookkeeping. Third: quarantine isn't a dead end. A box flagged over a bad weighing can be **re-weighed on the spot** and re-enters the cure cycle the moment the numbers check out, instead of sitting there forever." | **J** (+6 h) to show a DRYING box crossing to READY (watch the banner); open `/db` to show the consistency badge; press **D** for a reference with zero stock to show a batch open — it ships itself on the next **J**, no button needed; open the quarantine panel and re-weigh a flagged box |
 
 Close: *"Everything you saw ran live. No video, no slides. The embedded board,
 the warehouse logic and the 3D are three separate programs talking over MQTT
@@ -67,22 +67,25 @@ not notice; neither will they.
 
 ## Hostile questions, and the honest answer
 
-**"Why no camera? The brief says *voir*."**
-> A barcode scan *is* the identification step — it is exact, unlike a camera
-> guessing at a part under sand dust and variable lighting. The operator
-> still sees the zone through the 3D twin, in real time. And identification
-> is never trusted blind: the scale still has to confirm the weight lines up
-> with a clean whole number of cores at that barcode's own registered mass,
-> or the box is quarantined rather than guessed at.
+**"Why a barcode at all? The brief says *voir*."**
+> Both are simulated, and they check each other. A barcode scan is exact,
+> unlike a camera guessing at a part under sand dust and variable lighting
+> — but a barcode only says what a box CLAIMS to hold, so a simulated
+> vision station reads its actual shape and cross-checks it against that
+> claim. Neither is trusted blind: if vision disagrees with the barcode, or
+> the weight doesn't line up with a clean count either sensor supports, the
+> box is quarantined rather than guessed at. The operator also sees the
+> zone through the 3D twin, in real time.
 
 **"Dividing weight by unit mass is fragile — cores vary."**
-> That is exactly why the per-noyau weight is registered on the SPECIFIC
-> physical box's own barcode, not looked up from a shared article average —
-> batch-to-batch variation is a non-issue because we are dividing by that
-> box's own measured value. And it is not blind trust: if the real contents
-> do not match — swapped after labelling, or a bad registration — the weight
-> will not land on any clean multiple of that value, and the box is
-> quarantined rather than accepted on a guess.
+> It used to be — a fixed tolerance either missed real mismatches for some
+> quantities or wrongly quarantined honest boxes at realistic per-core
+> variance. That's why there are now two independent measurements: the
+> per-noyau weight registered on the SPECIFIC physical box's own barcode
+> (not a shared article average), and the vision station's own visible-core
+> count. When they agree, or are off by at most one or two, the box is
+> accepted at the more conservative figure; a bigger gap, or vision naming
+> a different reference entirely, quarantines it rather than guessing.
 
 **"Your rack has no physical FIFO mechanism."**
 > Deliberately. Gravity-flow lanes force FIFO but need two access faces, which

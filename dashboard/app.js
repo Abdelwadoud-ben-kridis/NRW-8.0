@@ -35,6 +35,7 @@ let lastBannerT = -1;
 let lastOrderId = null;
 let firstRender = true;
 let orderOpBusy = false;
+const quarOpBusy = new Set();      // box_ids with an archive/recount in flight
 let activeView = "rack";        // "rack" | "twin"
 let selectedSlot = null;        // slot_id currently pinned in the inspector
 let invSort = { key: "t_in_sim", dir: 1 };
@@ -224,6 +225,10 @@ const tDet = (s) => {
   if (m) return L.detUnknownBarcode(m[1]);
   m = /^code-barre deja utilise par (.+)$/.exec(s);
   if (m) return L.detReusedBarcode(m[1]);
+  m = /^vision : ref\. (\S+) detectee, code-barre (\S+) annonce (\S+)$/.exec(s);
+  if (m) return L.detVisionMismatch(m[1], m[2], m[3]);
+  m = /^ecart de comptage : pesee (\d+), vision (\d+) noyaux$/.exec(s);
+  if (m) return L.detCountGap(m[1], m[2]);
   return s;
 };
 
@@ -420,8 +425,14 @@ function render(st) {
   $("esp32-online").textContent = dev.online ? L.online : L.offline;
   $("esp32-state").className = "esp32-state st-" + dev.state;
   $("esp32-state").textContent = L.esp32St[dev.state] || dev.state;
-  $("esp32-beam").textContent = dev.online ? dev.count_beam : "—";
-  $("esp32-beam-k").textContent = L.beamCount;
+  // Weight is the ESP32's only sensor (contract 1.5/1.7) -- this slot now
+  // shows the simulated vision station's cross-check on the most recent
+  // box instead of a beam count nothing reads any more.
+  const idBox = st.boxes.find((b) => b.box_id === st.crane.box_id) ||
+    st.boxes.slice().sort((a, b2) => b2.t_in_sim - a.t_in_sim)[0];
+  $("esp32-beam").textContent = idBox && idBox.vision_ref
+    ? `${idBox.vision_ref} (${idBox.id_confidence || "—"})` : "—";
+  $("esp32-beam-k").textContent = L.visionRef;
   $("esp32-mass").textContent = dev.online ? `${(dev.gross_g / 1000).toFixed(2)} kg` : "—";
   $("esp32-mass-k").textContent = L.grossMass;
   $("esp32-stable").textContent = dev.online ? (dev.stable ? `● ${L.stable}` : `○ ${L.unstable}`) : "";
@@ -470,14 +481,38 @@ function render(st) {
   if (quar.length) {
     $("quar-list").innerHTML = quar.map((b) => {
       const m = /^masse nette ([\d.]+) g incompatible avec le code-barre (\S+) \(([\d.]+) g\/noyau attendu, ecart ([\d.]+) g\)$/.exec(b.reason || "");
-      return `<div class="quar-row">
+      const busy = quarOpBusy.has(b.box_id);
+      return `<div class="quar-row" data-box="${b.box_id}">
         <div class="hd"><span>${b.box_id}</span><span>${b.ref || L.unknownRef}</span></div>
         <div class="why">${tDet(b.reason) || "—"}</div>
         ${m ? `<div class="evid"><span>${L.netMass} <b>${m[1]} g</b></span>
                 <span>${L.perCore} <b>${m[3]} g</b></span>
                 <span>${L.gap} <b>${m[4]} g</b></span></div>` : ""}
+        <div class="row tight">
+          <input type="number" min="0" class="f1" data-regross placeholder="${L.netMass}" value="${b.gross_g}">
+          <button class="ghost" data-act="recount" ${busy ? "disabled" : ""}>${L.recount}</button>
+          <button class="ghost" data-act="archive" ${busy ? "disabled" : ""}>${L.archive}</button>
+        </div>
       </div>`;
     }).join("");
+    $("quar-list").querySelectorAll("[data-act]").forEach((btn) => {
+      btn.onclick = async () => {
+        if (btn.disabled) return;
+        const row = btn.closest("[data-box]");
+        const boxId = row.dataset.box;
+        quarOpBusy.add(boxId);
+        row.querySelectorAll("button").forEach((x) => x.disabled = true);
+        try {
+          if (btn.dataset.act === "archive") {
+            await api(`/box/${boxId}/archive`, {});
+          } else {
+            const gross_g = +row.querySelector("[data-regross]").value || 0;
+            await api(`/box/${boxId}/recount`, { gross_g });
+          }
+          renderLog();
+        } finally { quarOpBusy.delete(boxId); }
+      };
+    });
   }
 
   // --- rack + slot inspector ---
@@ -507,10 +542,14 @@ function render(st) {
         <span>${o.status === "CANCELLED" ? L.reservationReleased
               : o.status === "IN_PRODUCTION" ? L.batchOpened : (o.status || "")}</span>
         ${o.shortfall ? `<span style="color:#ff9a9a">${L.shortfall}: ${o.shortfall}</span>` : ""}
+        ${o.status === "IMPOSSIBLE"
+          ? `<span title="${L.etaHint(o.eta_sim != null ? simLabel(o.eta_sim) : "")}">${
+              o.eta_sim != null ? L.etaHint(simLabel(o.eta_sim)) : L.etaNone}</span>` : ""}
       </div>
       <div class="muted" style="margin-top:6px">${L.picks}</div>
       ${(o.picks || []).map((p) => `<div class="pick">
-          <span><span class="rank">#${p.rank}</span>${p.box_id} · ${p.slot_id || "—"}</span>
+          <span><span class="rank">#${p.rank}</span>${p.box_id} · ${p.slot_id || "—"}
+            ${p.partial ? `<span class="tag" title="${L.partialPickHint}">${L.partialPick}</span>` : ""}</span>
           <span>${p.take} · ${simLabel(p.t_in_sim)}</span></div>`).join("") ||
         `<div class="muted">—</div>`}
       <div class="rejtitle">${L.rejected}</div>
@@ -549,7 +588,7 @@ function render(st) {
     return `<tr class="${picked ? "sel" : ""}" title="${tDet(b.reason) || ""}">
       <td>${b.box_id}</td>
       <td class="codecell">${barcodeSvg(b.code)}<div class="codetxt">${b.code || "—"}</div></td>
-      <td>${b.ref || "—"}</td><td>${b.label || "—"}</td>
+      <td title="${b.vision_ref ? `${L.visionRef}: ${b.vision_ref} (${b.id_confidence || "—"})` : ""}">${b.ref || "—"}</td><td>${b.label || "—"}</td>
       <td class="num">${b.qty_initial}</td><td class="num">${b.qty_available}</td>
       <td><span class="tag s-${b.state}">${L.st[b.state] || b.state}</span></td>
       <td>${b.slot_id || "—"}</td>
@@ -736,6 +775,13 @@ function eventBits(kind, p) {
     case "arrival_fallback": return [p.box_id, p.barcode_id, tDet(p.reason)];
     case "system_reset": return [p.keep_articles ? "seed=false" : null];
     case "scenario_loaded": return [p.name];
+    case "batch_opened": return [p.order_id, p.ref, `${L.shortfall}: ${p.target}`];
+    case "batch_shipped": return [p.order_id, `${p.delivered}/${p.target}`,
+                                  (p.lost_to_quarantine || []).length
+                                    ? `${(p.lost_to_quarantine || []).length} ${L.kpiQuar}` : null];
+    case "batch_cancelled": return [p.order_id, (p.released_to_stock || []).join(" + ") || null];
+    case "box_archived": return [p.box_id, p.from_state];
+    case "box_recount": return [p.box_id, p.accepted ? `${p.ref} · ${p.qty}` : tDet(p.reason)];
     default: return [JSON.stringify(p)];
   }
 }

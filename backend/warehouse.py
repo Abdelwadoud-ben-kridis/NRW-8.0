@@ -98,20 +98,24 @@ def _occupy_a_slot(con, box_id: str) -> dict | None:
 def _insert_box_row(con, now_sim: float, box_id: str, article_ref: str | None,
                     qty: int, state: str, count_weight: int,
                     gross_g: float, confidence: str, reason: str | None,
-                    slot: dict | None, code: str, batch_id: str | None) -> None:
+                    slot: dict | None, code: str, batch_id: str | None,
+                    vision_ref: str | None = None,
+                    id_confidence: str | None = None) -> None:
     req_h = E.required_cure_h()
     con.execute(
         "INSERT INTO boxes(box_id,article_ref,qty_initial,qty_available,slot_id,"
         "state,t_in_sim,required_cure_h,ready_at_sim,count_beam,count_weight,"
-        "gross_g,confidence,reason,code,batch_id) VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?)",
+        "gross_g,confidence,reason,code,batch_id,vision_ref,id_confidence) "
+        "VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)",
         (box_id, article_ref, qty, qty, slot["slot_id"] if slot else None, state,
          now_sim, req_h, now_sim + req_h * 3600.0, count_weight,
-         gross_g, confidence, reason, code, batch_id))
+         gross_g, confidence, reason, code, batch_id, vision_ref, id_confidence))
 
 
 def create_box(con, now_sim: float, barcode_id: str, gross_g: float,
                source: str, t_c: float | None = None, rh: float | None = None,
-               fw: str | None = None, batch_id: str | None = None) -> dict:
+               fw: str | None = None, batch_id: str | None = None,
+               vision: dict | None = None) -> dict:
     """Create exactly one box from one arrival's evidence.
 
     Called only after the caller (backend/main.py) has already decided this
@@ -126,6 +130,15 @@ def create_box(con, now_sim: float, barcode_id: str, gross_g: float,
     counting question:
       - the barcode was never registered ("code-barre inconnu")
       - the barcode was already consumed by an earlier box ("deja utilise")
+
+    `vision` (contract 1.7), when given, is one simulated camera reading
+    from `backend/plant.py::simulate_vision` -- a second, independent sensor
+    that `algo.engine.identify_core` matches against the catalogue BEFORE
+    `assess_box` runs, so a barcode that lies about what is physically in
+    the crate is caught even when the weight alone would not have noticed
+    (see assess_box's own docstring). `None` (the manual "quick box"
+    shortcut, or a caller with no camera) falls back to barcode-only
+    identification, unchanged from before contract 1.7.
 
     `batch_id` tags this box to an IN_PRODUCTION order (see reserve()) when
     it is being produced to cover a shortfall existing FIFO stock couldn't
@@ -159,7 +172,22 @@ def create_box(con, now_sim: float, barcode_id: str, gross_g: float,
                    "code": barcode_id}
 
         art = DB.one(con, "SELECT * FROM articles WHERE ref=?", (bc["ref"],))
-        verdict = E.assess_box(bc, art, gross_g)
+        vision_ref = vision_confidence = vision_count = None
+        if vision:
+            all_articles = DB.rows(con, "SELECT * FROM articles")
+            idv = E.identify_core(vision, all_articles)
+            # Confidence is recorded even when it's NULLE (vision saw
+            # SOMETHING but couldn't confidently match it to any known
+            # reference) -- that is a different, worse signal than "no
+            # camera reading was taken at all", and the box row should be
+            # able to say which one happened.
+            vision_confidence = idv["confidence"]
+            if idv["confidence"] != "NULLE":
+                vision_ref = idv["ref"]
+            vision_count = vision.get("count_visible")
+        verdict = E.assess_box(bc, art, gross_g, vision_ref=vision_ref,
+                               vision_count=vision_count,
+                               vision_confidence=vision_confidence)
         slot = None
         if verdict["accepted"]:
             slot = _occupy_a_slot(con, box_id)
@@ -172,7 +200,9 @@ def create_box(con, now_sim: float, barcode_id: str, gross_g: float,
         qty = verdict["quantity"] if state != "QUARANTINE" else 0
         _insert_box_row(con, now_sim, box_id, bc["ref"], qty, state,
                         verdict["count_weight"], gross_g,
-                        verdict["confidence"], reason, slot, barcode_id, batch_id)
+                        verdict["confidence"], reason, slot, barcode_id, batch_id,
+                        vision_ref=verdict.get("vision_ref"),
+                        id_confidence=verdict.get("id_confidence"))
 
         # Consumed the instant it's scanned, accepted or not -- a sticker
         # that already went through the conveyor once can never be replayed
@@ -185,6 +215,8 @@ def create_box(con, now_sim: float, barcode_id: str, gross_g: float,
             "box_id": box_id, "ref": bc["ref"], "qty": qty, "barcode_id": barcode_id,
             "slot": slot["slot_id"] if slot else None, "state": state,
             "confidence": verdict["confidence"],
+            "vision_ref": verdict.get("vision_ref"),
+            "id_confidence": verdict.get("id_confidence"),
             "reason": reason, "required_cure_h": round(E.required_cure_h(), 1),
             **evidence})
         DB.meta_set(con, "t_sim", now_sim)
@@ -237,9 +269,15 @@ def reserve(con, now_sim: float, ref: str, qty: int) -> dict:
         plan = E.fifo_allocate(boxes, ref, int(qty), now_sim, order_id)
 
         if not plan["picks"]:
+            # batch_id boxes are earmarked for a DIFFERENT order already --
+            # they must not count as "already in the pipeline" for this
+            # fresh demand (finding: this used to let one demand justify
+            # skipping a new batch by counting stock that was never actually
+            # available to it).
             total_pipeline = sum(int(b["qty_available"]) for b in boxes
                                  if b["article_ref"] == ref
-                                 and b["state"] not in ("QUARANTINE", "EMPTY"))
+                                 and b["state"] not in ("QUARANTINE", "EMPTY")
+                                 and not b.get("batch_id"))
             if total_pipeline < int(qty):
                 # Genuinely not enough anywhere, curing or not -- the whole
                 # request becomes a production batch instead of a refusal.
@@ -529,6 +567,38 @@ def sweep_expired(con, now_sim: float) -> list[dict]:
     return expired
 
 
+def auto_ship_ready_batches(con, now_sim: float) -> list[dict]:
+    """Ship every IN_PRODUCTION batch that has nothing left DRYING, on its
+    own, without waiting for someone to press the manual ship button.
+
+    docs/contracts.md's own description of a batch says it "ships every box
+    in it together the moment the last one clears its 24 h cure" -- that was
+    only true if a human happened to press confirm() at the right moment.
+    Called from loop_clock's 0.2 s tick; runs its own sweep_cured first (that
+    function's own cheap no-op fast path makes calling it twice per tick
+    free) so a batch box that crossed its 24 h floor since the LAST sweep is
+    seen as cured here too, rather than depending on the caller happening to
+    have swept immediately before -- a caller (a test, `/api/demand/confirm`
+    firing at exactly the right instant) that skips straight to this
+    function must not silently under-report a batch as still curing.
+    """
+    sweep_cured(con, now_sim)
+    open_orders = DB.rows(con, "SELECT order_id FROM orders WHERE status='IN_PRODUCTION'")
+    if not open_orders:
+        return []
+    shipped = []
+    for row in open_orders:
+        order_id = row["order_id"]
+        boxes = DB.rows(con, "SELECT state FROM boxes WHERE batch_id=?", (order_id,))
+        if boxes and not any(b["state"] == "DRYING" for b in boxes):
+            try:
+                res = confirm(con, now_sim, order_id)
+                shipped.append({"order_id": order_id, **res})
+            except OpError:
+                pass    # raced with a manual confirm/cancel this same tick -- fine
+    return shipped
+
+
 def sweep_cured(con, now_sim: float) -> list[dict]:
     """Move every DRYING box whose 24 h have elapsed to READY. Same cheap
     no-op fast path as sweep_expired."""
@@ -549,6 +619,112 @@ def sweep_cured(con, now_sim: float) -> list[dict]:
         if cured:
             DB.meta_set(con, "t_sim", now_sim)
     return cured
+
+
+# ---------------------------------------------------------------------------
+# Quarantine workflow (contract 1.7) -- a quarantined box used to be a dead
+# end: it sat forever, unreachable by any endpoint, with no way to record
+# "someone looked at this and it really is scrap" or "someone re-weighed it
+# and it turns out to be fine after all".
+# ---------------------------------------------------------------------------
+
+def archive_box(con, now_sim: float, box_id: str) -> dict:
+    """Close out a QUARANTINE or EMPTY box for good -- a human decided this
+    crate is done (scrapped, or already fully picked and put away) and it
+    should stop appearing as an open problem on the dashboard."""
+    with DB.transaction(con):
+        b = DB.one(con, "SELECT * FROM boxes WHERE box_id=?", (box_id,))
+        if not b:
+            raise OpError("unknown box: %s" % box_id, code=404)
+        if b["state"] not in ("QUARANTINE", "EMPTY"):
+            raise OpError("box %s is %s, cannot archive" % (box_id, b["state"]), code=409)
+        n = DB.cas_update(con, "boxes", "box_id", box_id,
+                          expect={"state": b["state"]}, patch={"state": "ARCHIVED"})
+        if n != 1:
+            raise OpError("internal: box %s changed under us" % box_id, code=409)
+        DB.log_event(con, now_sim, "box_archived",
+                    {"box_id": box_id, "from_state": b["state"]})
+    return {"ok": True, "box_id": box_id, "state": "ARCHIVED"}
+
+
+def recount_box(con, now_sim: float, box_id: str, gross_g: float,
+                vision: dict | None = None) -> dict:
+    """Re-present a QUARANTINED box's evidence for a second look, without
+    inventing a second physical crate for the same barcode: a worker
+    re-weighs it (and, if the vision station is available, re-scans it),
+    and this re-runs the exact same identification+quantity decision
+    `create_box` would have made on arrival. Only possible while the box's
+    own barcode is still known with a real reference -- an
+    unregistered-barcode quarantine has nothing to recount against, since
+    there was never a claim to re-check in the first place.
+
+    A successful recount re-stamps `t_in_sim` to now: the 24 h cure clock
+    starts from the moment the contents were actually confirmed good, same
+    as any other box that only just proved itself (contract 1.7 -- no
+    wall-clock, but also no free cure time for a box that spent time as an
+    unresolved quarantine case).
+    """
+    with DB.transaction(con):
+        b = DB.one(con, "SELECT * FROM boxes WHERE box_id=?", (box_id,))
+        if not b:
+            raise OpError("unknown box: %s" % box_id, code=404)
+        if b["state"] != "QUARANTINE":
+            raise OpError("box %s is %s, cannot recount" % (box_id, b["state"]), code=409)
+        bc = DB.one(con, "SELECT * FROM barcodes WHERE barcode_id=?", (b["code"],))
+        if bc is None or bc["ref"] is None:
+            raise OpError(
+                "box %s has no known, valid barcode to recount against" % box_id,
+                code=409)
+
+        art = DB.one(con, "SELECT * FROM articles WHERE ref=?", (bc["ref"],))
+        vision_ref = vision_confidence = vision_count = None
+        if vision:
+            all_articles = DB.rows(con, "SELECT * FROM articles")
+            idv = E.identify_core(vision, all_articles)
+            vision_confidence = idv["confidence"]
+            if idv["confidence"] != "NULLE":
+                vision_ref = idv["ref"]
+            vision_count = vision.get("count_visible")
+        verdict = E.assess_box(bc, art, gross_g, vision_ref=vision_ref,
+                               vision_count=vision_count,
+                               vision_confidence=vision_confidence)
+
+        if not verdict["accepted"]:
+            DB.update(con, "boxes", "box_id", box_id, {
+                "gross_g": gross_g, "reason": verdict["reason"],
+                "count_weight": verdict["count_weight"],
+                "vision_ref": verdict.get("vision_ref"),
+                "id_confidence": verdict.get("id_confidence")})
+            DB.log_event(con, now_sim, "box_recount", {
+                "box_id": box_id, "accepted": False, "reason": verdict["reason"]})
+            return {"ok": True, "accepted": False, "box_id": box_id,
+                   "reason": verdict["reason"]}
+
+        slot = _occupy_a_slot(con, box_id)
+        if not slot:
+            DB.update(con, "boxes", "box_id", box_id,
+                     {"reason": "aucun emplacement libre"})
+            DB.log_event(con, now_sim, "box_recount", {
+                "box_id": box_id, "accepted": False,
+                "reason": "aucun emplacement libre"})
+            return {"ok": True, "accepted": False, "box_id": box_id,
+                   "reason": "aucun emplacement libre"}
+
+        req_h = E.required_cure_h()
+        DB.update(con, "boxes", "box_id", box_id, {
+            "article_ref": bc["ref"], "qty_initial": verdict["quantity"],
+            "qty_available": verdict["quantity"], "slot_id": slot["slot_id"],
+            "state": "DRYING", "t_in_sim": now_sim, "required_cure_h": req_h,
+            "ready_at_sim": now_sim + req_h * 3600.0,
+            "count_weight": verdict["count_weight"], "gross_g": gross_g,
+            "confidence": verdict["confidence"], "reason": None,
+            "vision_ref": verdict.get("vision_ref"),
+            "id_confidence": verdict.get("id_confidence")})
+        DB.log_event(con, now_sim, "box_recount", {
+            "box_id": box_id, "accepted": True, "ref": bc["ref"],
+            "qty": verdict["quantity"], "slot": slot["slot_id"]})
+        return {"ok": True, "accepted": True, "box_id": box_id, "ref": bc["ref"],
+               "qty": verdict["quantity"], "slot": slot["slot_id"]}
 
 
 # ---------------------------------------------------------------------------

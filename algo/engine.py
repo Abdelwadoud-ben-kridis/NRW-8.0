@@ -24,6 +24,14 @@ import re
 
 TARE_G = 1800.0            # empty crate 51.5x32.5x17.5 cm, 1.8 kg
 
+# Per-core manufacturing variability assumed for the weight-based count
+# (contract 1.7 finding: a FIXED absolute tolerance across every box size
+# either over-quarantines large clean boxes under realistic noise, or
+# under-catches a mismatched reference for small ones -- neither is right).
+# `SCALE_NOISE_G` is the load-cell's own reading noise, independent of N.
+CORE_MASS_CV = 0.03
+SCALE_NOISE_G = 5.0
+
 # CDC hard requirement: every box dries exactly 24 h, no exceptions. This is
 # NOT a floor for an adaptive model -- the CDC (cahier des charges) never asks
 # for one, and contract 1.2 drops the earlier adaptive-cure idea entirely.
@@ -120,37 +128,109 @@ def count_from_weight(gross_g: float, unit_mass_g: float,
     return max(0, round((gross_g - tare_g) / unit_mass_g))
 
 
+def identify_core(vision: dict, articles: list) -> dict:
+    """Nearest-reference match from one simulated vision-station reading.
+
+    `vision` = {"len_mm","wid_mm","h_mm","holes"} as measured (with sensor
+    noise) by the simulated camera at the vision station -- a SECOND,
+    INDEPENDENT sensor from the scale and the barcode, which is what
+    actually answers the CDC's "voir, identifier" (criterion 2): the
+    barcode says what a box SHOULD contain, this says what it LOOKS like it
+    contains.
+
+    `articles` is the catalogue, each row carrying the same shape keys plus
+    "ref". Distance is normalised per dimension by ~3% of that reference's
+    own nominal size (matching the noise `backend/plant.py::simulate_vision`
+    injects), so references of very different scale are compared fairly.
+    `holes` (the core-print count) is a discrete feature a camera reads
+    exactly -- any mismatch there is penalised heavily, since a wrong hole
+    count is a near-certain sign of a different part, not sensor noise.
+
+    Pure and I/O-free like the rest of this module: `create_box` fetches the
+    article rows and calls this before deciding whether the barcode's
+    declared reference is worth believing.
+
+    Returns {"ref", "confidence": HAUTE/MOYENNE/NULLE, "distance", "runner_up"}.
+    """
+    if not articles:
+        return {"ref": None, "confidence": "NULLE", "distance": None, "runner_up": None}
+
+    scored = []
+    for art in articles:
+        d = 0.0
+        for key in ("len_mm", "wid_mm", "h_mm"):
+            nominal = float(art.get(key) or 1.0)
+            sigma = max(0.03 * nominal, 0.5)
+            d += ((float(vision.get(key, nominal)) - nominal) / sigma) ** 2
+        holes_a, holes_v = art.get("holes"), vision.get("holes")
+        if holes_a is not None and holes_v is not None and int(holes_a) != int(holes_v):
+            d += 50.0
+        scored.append((d, art["ref"]))
+    scored.sort(key=lambda x: x[0])
+
+    best_d, best_ref = scored[0]
+    runner_up = scored[1][1] if len(scored) > 1 else None
+    runner_d = scored[1][0] if len(scored) > 1 else None
+
+    if best_d > 30.0:
+        confidence = "NULLE"                       # matches nothing we know
+    elif runner_d is None or (runner_d - best_d) > 8.0:
+        confidence = "HAUTE"
+    else:
+        confidence = "MOYENNE"                      # two references look alike
+
+    return {"ref": best_ref, "confidence": confidence,
+           "distance": round(best_d, 2), "runner_up": runner_up}
+
+
 def assess_box(barcode: dict, article: dict, gross_g: float,
-               tare_g: float = TARE_G) -> dict:
-    """Count a box from the scale alone.
+               tare_g: float = TARE_G, vision_ref: str | None = None,
+               vision_count: int | None = None,
+               vision_confidence: str | None = None) -> dict:
+    """Count (and, if a vision reading is given, cross-check the identity of)
+    a box.
 
-    Identification already happened before this ever runs: the conveyor's
-    barcode scanner read `barcode_id` and backend/warehouse.py::create_box
-    looked it up, so the reference and per-noyau weight are GIVEN, not
-    guessed -- an unregistered or already-used barcode never reaches this
-    function at all (it's quarantined one level up, in create_box).
+    Identification starts before this ever runs: the conveyor's barcode
+    scanner read `barcode_id` and backend/warehouse.py::create_box looked it
+    up, so the reference and per-noyau weight are a CLAIM, not yet a
+    certainty -- an unregistered or already-used barcode never reaches this
+    function at all (quarantined one level up, in create_box).
 
-    The scale is the only sensor left, so there is only one question left to
-    ask: does the net mass look like a clean whole number of cores at THIS
-    box's own registered weight?
+    Two questions, in order:
 
-        count    = round((gross - tare) / barcode's unit_mass_g)
-        residual = |net - count * unit_mass_g|
+    1. Identification (criterion 2, "voir, identifier"): if `vision_ref` is
+       given (from `identify_core` against a simulated camera reading) and
+       it names a DIFFERENT reference than the barcode declares, the box is
+       quarantined immediately -- the wrong physical cores were loaded into
+       this labelled crate. This is caught independently of the weight
+       maths below, which is essential: a wrong-reference swap can, for
+       some quantities, coincidentally still land on a clean multiple of
+       the declared weight (finding: this used to slip through 1 time in 4
+       when only the scale was asked).
 
-    A small residual means the physical contents match what the barcode
-    promised. A large one means a mismatch -- cores swapped after labelling,
-    the wrong sticker on the wrong box, or a weight mismeasured at
-    registration -- and it is caught here with no second sensor needed: the
-    weight simply will not line up with any clean multiple of the registered
-    per-noyau mass. Honest limitation: for a very light reference, a
-    mismatched box can coincidentally land near a multiple of the wrong
-    weight and slip through; there is no second measurement here to catch
-    that, by design (finding: the earlier beam+scale cross-check gave that
-    protection at the cost of hardware complexity the CDC never asked for).
+    2. Quantity: does the net mass look like a clean whole number of cores
+       at THIS box's own registered weight?
+
+           count    = round((gross - tare) / barcode's unit_mass_g)
+           residual = |net - count * unit_mass_g|
+
+       With no second measurement, a tight absolute tolerance
+       (`max(tol, 0.12*unit)`) is the only guard against a mismatched box,
+       so it stays tight and unforgiving -- exactly the original,
+       zero-vision behaviour, still what every call site that has no camera
+       reading gets. When a vision core-count IS available, a weight
+       reading that fails that tight tolerance is not necessarily wrong:
+       real per-core mass varies (~3% CV), so a large, honest box can drift
+       past a fixed absolute band on noise alone (finding: 25-60% of
+       otherwise-good boxes at realistic variance). The vision count is the
+       second, independent measurement that resolves the ambiguity --
+       agreeing with the weight count RESCUES an over-tolerance box at
+       MOYENNE confidence, using the lower of the two counts; disagreeing
+       by 2 or more is a real inconsistency, quarantined either way.
 
     Returns a dict ready to be written straight into the `boxes` row:
         {count_weight, quantity, confidence, accepted, state, reason,
-         unit_mass_measured}
+         unit_mass_measured, vision_ref, id_confidence}
     """
     unit = float(barcode["unit_mass_g"])
     tol = float(article.get("tolerance_g", 5.0))
@@ -163,9 +243,30 @@ def assess_box(barcode: dict, article: dict, gross_g: float,
         "count_weight": int(count),
         "gross_g": float(gross_g),
         "unit_mass_measured": round((net / count), 1) if count > 0 else 0.0,
+        # id_confidence reflects how sure VISION is about whatever it saw --
+        # set even when that's NULLE (a camera reading was taken but didn't
+        # confidently match anything, a worse signal than no reading at
+        # all) or when `vision_ref` ends up None for the same reason. A
+        # caller with no vision reading at all leaves both None.
+        "vision_ref": vision_ref, "id_confidence": vision_confidence,
     }
 
-    if count <= 0 or residual > id_tol:
+    declared_ref = barcode.get("ref")
+    if vision_ref is not None and declared_ref is not None and vision_ref != declared_ref:
+        # A confident wrong answer is a stronger, more convincing signal for
+        # the jury than an unsure one -- id_confidence (already set above)
+        # is left as vision's own read on the reference it actually saw;
+        # the mismatch itself is conveyed by `reason` and `accepted`.
+        out.update(quantity=0, confidence="NULLE", accepted=False,
+                   state="QUARANTINE",
+                   reason=("vision : ref. %s detectee, code-barre %s annonce %s"
+                           % (vision_ref, barcode["barcode_id"], declared_ref)))
+        return out
+    if vision_ref is not None and not vision_confidence:
+        out["id_confidence"] = "HAUTE"   # a caller-supplied ref with no
+                                          # confidence value (e.g. a test)
+
+    if count <= 0:
         out.update(quantity=0, confidence="NULLE", accepted=False,
                    state="QUARANTINE",
                    reason=("masse nette %.0f g incompatible avec le code-barre "
@@ -173,8 +274,51 @@ def assess_box(barcode: dict, article: dict, gross_g: float,
                            % (net, barcode["barcode_id"], unit, residual)))
         return out
 
-    out.update(quantity=count, confidence="HAUTE", accepted=True,
-               state="STORING", reason=None)
+    weight_ok = residual <= id_tol
+    gap = abs(int(vision_count) - count) if vision_count is not None else None
+
+    # A large disagreement between the two independent measurements is a
+    # genuine anomaly, whatever the weight tolerance alone said -- a camera
+    # miscounting by a handful of cores from occlusion noise is implausible
+    # (calibrated well under this in backend/plant.py::simulate_vision), so
+    # a gap this big means something is actually wrong with the box.
+    if gap is not None and gap >= 3:
+        out.update(quantity=0, confidence="NULLE", accepted=False,
+                   state="QUARANTINE",
+                   reason=("ecart de comptage : pesee %d, vision %d noyaux"
+                           % (count, int(vision_count))))
+        return out
+
+    if weight_ok:
+        # The scale alone is already confident. A vision count within 2
+        # cores is ordinary occlusion noise, not a reason to distrust a
+        # clean weight reading -- this is what fixes the false-quarantine
+        # rate under realistic per-core mass variance without weakening the
+        # dedicated large-disagreement check above (finding: 25-60% of
+        # honest boxes were quarantined before vision existed to confirm
+        # them).
+        conf = "HAUTE" if not gap else "MOYENNE"
+        out.update(quantity=count, confidence=conf, accepted=True,
+                   state="STORING", reason=None)
+        return out
+
+    if gap is not None and gap <= 2:
+        # Weight alone failed its tight tolerance, but an independent
+        # camera count agrees closely -- accept the lower, more
+        # conservative figure at MOYENNE instead of quarantining a box two
+        # sensors mostly agree on.
+        out.update(quantity=min(count, int(vision_count)), confidence="MOYENNE",
+                   accepted=True, state="STORING", reason=None)
+        return out
+
+    # Weight failed tolerance and there is no vision reading to rescue it
+    # (or vision could not be read either) -- original, zero-vision
+    # behaviour: quarantine, no second chance.
+    out.update(quantity=0, confidence="NULLE", accepted=False,
+               state="QUARANTINE",
+               reason=("masse nette %.0f g incompatible avec le code-barre "
+                       "%s (%.1f g/noyau attendu, ecart %.0f g)"
+                       % (net, barcode["barcode_id"], unit, residual)))
     return out
 
 
@@ -228,14 +372,22 @@ def fifo_allocate(boxes: list, ref: str, qty: int, now_sim: float,
     `boxes` = every box currently in the warehouse (any ref, any state).
     Returns the contract shape documented in docs/contracts.md section 4.
 
-    Boxes are shipped WHOLE, never split: a pick always takes a candidate
-    box's entire qty_available, so a box can never be left half-consumed
-    (contract 1.3). Because of that, `qty_allocated` may legitimately exceed
-    `qty_requested` -- covering an order can require rounding up to the next
-    whole box. And because a box can't be split to make up a shortfall, the
-    total WHOLE-box stock for `ref` must already cover `qty` before anything
-    is reserved: if it doesn't, nothing is picked at all (status IMPOSSIBLE)
-    rather than silently handing out less than what was asked for.
+    Picks are FIFO and may be PARTIAL (contract 1.7, reversing 1.3): a demand
+    takes only what it needs from the oldest box, and any remainder stays
+    READY under its own original `t_in_sim` so it is still first in line
+    next time (`apply_pick`, called by confirm(), already preserved
+    `t_in_sim` on a partial take -- this function simply started generating
+    one again). `qty_allocated` therefore lands exactly on `qty_requested`
+    whenever the pipeline can cover it at all, instead of rounding up to the
+    next whole box. Total READY stock for `ref` must still cover `qty`
+    before anything is reserved: if it doesn't, nothing is picked at all
+    (status IMPOSSIBLE) rather than silently handing out less than asked.
+
+    A box already produced FOR another order's production batch
+    (`batch_id` set) is not general stock -- it is excluded from `pickable`
+    entirely, with its own rejection reason, so one demand can no longer
+    silently steal boxes another order is waiting on (finding: `_ship_batch`
+    used to ship short with no warning when this happened).
 
     The REJECTED list is the deliverable. Anyone can sort a list by date; what
     convinces a jury is showing, per box, the reason it was passed over.
@@ -248,8 +400,14 @@ def fifo_allocate(boxes: list, ref: str, qty: int, now_sim: float,
     candidates.sort(key=fifo_key)
 
     pickable = []
+    drying_not_yet_needed = []
     for b in candidates:
         state = b["state"]
+
+        if b.get("batch_id"):
+            rejected.append({"box_id": b["box_id"], "reason": "reserve au lot",
+                             "detail": b["batch_id"], "t_in_sim": b["t_in_sim"]})
+            continue
 
         # self-healing: a box already past its 24 h floor is pickable even if
         # its state column still says DRYING -- sweep_cured only flips the
@@ -263,6 +421,7 @@ def fifo_allocate(boxes: list, ref: str, qty: int, now_sim: float,
             if state == "DRYING":
                 detail = "pret dans %.1f h" % hours_remaining(
                     b["t_in_sim"], b["required_cure_h"], now_sim)
+                drying_not_yet_needed.append(b)
             elif state == "RESERVED":
                 detail = b.get("locked_by") or "autre commande"
             elif state == "QUARANTINE":
@@ -284,6 +443,7 @@ def fifo_allocate(boxes: list, ref: str, qty: int, now_sim: float,
                 "detail": "pret dans %.1f h" % hours_remaining(
                     b["t_in_sim"], b["required_cure_h"], now_sim),
                 "t_in_sim": b["t_in_sim"]})
+            drying_not_yet_needed.append(b)
             continue
 
         avail = int(b["qty_available"])
@@ -297,7 +457,7 @@ def fifo_allocate(boxes: list, ref: str, qty: int, now_sim: float,
     total_avail = sum(int(b["qty_available"]) for b in pickable)
 
     if total_avail < needed:
-        # Not enough WHOLE boxes to cover the request -- refuse the whole
+        # Not enough READY stock to cover the request -- refuse the whole
         # reservation instead of reserving whatever is available. Every
         # otherwise-pickable box still shows up in `rejected`, so the jury
         # sees a stock problem, not a state problem.
@@ -307,10 +467,28 @@ def fifo_allocate(boxes: list, ref: str, qty: int, now_sim: float,
                 "detail": "%d disponible(s) au total pour %d demande(s)"
                           % (total_avail, needed),
                 "t_in_sim": b["t_in_sim"]})
+
+        # How long until the curing pipeline alone would cover the gap, so
+        # the refusal can say WHEN instead of just NO (criterion 6). Boxes
+        # still curing are walked oldest-ready-first; a shortfall this
+        # cannot close at all (not enough even once every one of them cures)
+        # leaves eta_sim as None -- that's exactly when backend/warehouse.py
+        # ::reserve opens a production batch instead.
+        eta_sim = None
+        cum = total_avail
+        for b in sorted(drying_not_yet_needed,
+                        key=lambda x: x["t_in_sim"] + x["required_cure_h"] * 3600.0):
+            if cum >= needed:
+                break
+            cum += int(b["qty_available"])
+            if cum >= needed:
+                eta_sim = b["t_in_sim"] + b["required_cure_h"] * 3600.0
+
         return {
             "order_id": order_id, "ref": ref, "qty_requested": needed,
             "qty_allocated": 0, "shortfall": needed,
             "picks": [], "rejected": rejected, "status": "IMPOSSIBLE",
+            "eta_sim": eta_sim,
         }
 
     picks = []
@@ -322,10 +500,11 @@ def fifo_allocate(boxes: list, ref: str, qty: int, now_sim: float,
                              "t_in_sim": b["t_in_sim"]})
             continue
         avail = int(b["qty_available"])
+        take = min(avail, needed - taken)
         picks.append({"box_id": b["box_id"], "slot_id": b.get("slot_id"),
-                      "take": avail, "t_in_sim": b["t_in_sim"],
-                      "rank": len(picks) + 1, "partial": False})
-        taken += avail
+                      "take": take, "t_in_sim": b["t_in_sim"],
+                      "rank": len(picks) + 1, "partial": take < avail})
+        taken += take
 
     return {
         "order_id": order_id,
@@ -336,6 +515,7 @@ def fifo_allocate(boxes: list, ref: str, qty: int, now_sim: float,
         "picks": picks,
         "rejected": rejected,
         "status": "PENDING" if picks else "IMPOSSIBLE",
+        "eta_sim": None,
     }
 
 
@@ -357,8 +537,12 @@ _TRANSITIONS = {
     "READY":       {"RESERVED", "QUARANTINE", "ARCHIVED"},
     "RESERVED":    {"READY", "EMPTY"},            # READY: cancel/expiry/partial pick
     "EMPTY":       {"ARCHIVED"},
-    "QUARANTINE":  {"ARCHIVED"},                  # operator re-presentation is out of
-                                                   # scope: no endpoint implements it
+    # ARCHIVED: closes out a dead box for good (backend/warehouse.py::
+    # archive_box). DRYING: a re-presented, now-accepted box re-enters the
+    # normal cure cycle from scratch (backend/warehouse.py::recount_box,
+    # contract 1.7) -- quarantine is no longer a dead end for a box whose
+    # barcode is still known and valid.
+    "QUARANTINE":  {"ARCHIVED", "DRYING"},
     "ARCHIVED":    set(),
 }
 

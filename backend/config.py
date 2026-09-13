@@ -73,4 +73,4 @@ DEVICE_LIVENESS_S = 5.0          # real (monotonic) seconds since the last
                                   # telemetry/box_done before the ESP32 pill
                                   # goes offline -- transport-domain, not t_sim
 
-CONTRACT_VERSION = "1.5"
+CONTRACT_VERSION = "1.7"

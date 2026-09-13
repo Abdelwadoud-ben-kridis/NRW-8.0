@@ -65,6 +65,11 @@ RELATIONS = [
     {"from": "boxes.locked_by", "to": "orders.order_id", "kind": "soft",
      "note": "set together with slots.reserved_for; the pair is checked by "
              "consistency check S4"},
+    {"from": "boxes.batch_id", "to": "orders.order_id", "kind": "soft",
+     "note": "set when a box was produced FOR an IN_PRODUCTION order's "
+             "shortfall (contract 1.6); such a box is invisible to every "
+             "OTHER order's fifo_allocate call (contract 1.7, check O5) -- "
+             "it is not general stock"},
     {"from": "orders.payload", "to": "boxes.box_id", "kind": "json",
      "note": "the FIFO plan (picks[] / rejected[]) is stored as a JSON blob, "
              "not rows; payload.status is kept equal to the status column"},

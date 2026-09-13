@@ -20,7 +20,18 @@ CREATE TABLE IF NOT EXISTS articles (
   unit_mass_g   REAL NOT NULL,
   tolerance_g   REAL NOT NULL DEFAULT 6.0,
   cure_floor_h  REAL NOT NULL DEFAULT 24.0,
-  color         TEXT DEFAULT '#4f8cff'
+  color         TEXT DEFAULT '#4f8cff',
+  -- Shape signature for the simulated vision station (criterion 2, "voir,
+  -- identifier"): a camera reading, independent of the barcode, that lets
+  -- algo/engine.py::identify_core cross-check what the barcode CLAIMS is in
+  -- the box against what the box actually LOOKS like. `holes` is a discrete
+  -- feature (core print count) a camera reads exactly; len/wid/h carry
+  -- normal manufacturing/measurement noise. Added by _migrate() for an
+  -- existing DB (defaults keep old rows matchable, if imprecisely).
+  len_mm        REAL NOT NULL DEFAULT 100.0,
+  wid_mm        REAL NOT NULL DEFAULT 70.0,
+  h_mm          REAL NOT NULL DEFAULT 40.0,
+  holes         INTEGER NOT NULL DEFAULT 2
 );
 
 CREATE TABLE IF NOT EXISTS slots (
@@ -64,7 +75,15 @@ CREATE TABLE IF NOT EXISTS boxes (
   -- fully covered by existing FIFO stock (backend/warehouse.py::reserve /
   -- produce_for_batch) -- NULL for ordinary stock. A batch order ships only
   -- once every box tagged to it has left DRYING (READY or QUARANTINE).
-  batch_id        TEXT REFERENCES orders(order_id)
+  batch_id        TEXT REFERENCES orders(order_id),
+  -- Identification cross-check evidence (criterion 2): the reference the
+  -- simulated vision station's shape signature matched (algo/engine.py::
+  -- identify_core), and how confident that match was (HAUTE/MOYENNE/NULLE).
+  -- NULL when no vision frame was available for this arrival (e.g. the
+  -- manual "quick box" shortcut) -- identification then rests on the
+  -- barcode scan alone, exactly as before contract 1.7. Added by _migrate().
+  vision_ref      TEXT,
+  id_confidence   TEXT
 );
 
 -- A slot holds at most one box, and a box occupies at most one slot -- these
@@ -116,11 +135,11 @@ CREATE INDEX IF NOT EXISTS idx_boxes_tin ON boxes(t_in_sim);
 """
 
 ARTICLES = [
-    # ref,     label,                       unit g, tol,  color
-    ("NY-114", "Noyau culasse 114",          206.0, 6.0,  "#4f8cff"),
-    ("NY-220", "Noyau corps de vanne 220",   412.0, 9.0,  "#22c98a"),
-    ("NY-075", "Noyau raccord 75",            88.5, 4.0,  "#f5a623"),
-    ("NY-330", "Noyau collecteur 330",       735.0, 12.0, "#c86bfa"),
+    # ref,     label,                     unit g, tol,   len,   wid,  h,   holes, color
+    ("NY-114", "Noyau culasse 114",        206.0, 6.0,  120.0,  85.0, 50.0, 2, "#4f8cff"),
+    ("NY-220", "Noyau corps de vanne 220", 412.0, 9.0,  150.0, 110.0, 70.0, 3, "#22c98a"),
+    ("NY-075", "Noyau raccord 75",          88.5, 4.0,   65.0,  45.0, 30.0, 1, "#f5a623"),
+    ("NY-330", "Noyau collecteur 330",     735.0, 12.0, 200.0,  95.0, 60.0, 4, "#c86bfa"),
 ]
 
 # colors offered to a reference created from the UI, cycled so a jury demo
@@ -150,6 +169,37 @@ def _migrate(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE boxes ADD COLUMN code TEXT")
     if "batch_id" not in box_cols:
         con.execute("ALTER TABLE boxes ADD COLUMN batch_id TEXT")
+    if "vision_ref" not in box_cols:
+        con.execute("ALTER TABLE boxes ADD COLUMN vision_ref TEXT")
+    if "id_confidence" not in box_cols:
+        con.execute("ALTER TABLE boxes ADD COLUMN id_confidence TEXT")
+
+    art_cols = {r["name"] for r in con.execute("PRAGMA table_info(articles)").fetchall()}
+    shape_cols_added = False
+    if "len_mm" not in art_cols:
+        con.execute("ALTER TABLE articles ADD COLUMN len_mm REAL NOT NULL DEFAULT 100.0")
+        shape_cols_added = True
+    if "wid_mm" not in art_cols:
+        con.execute("ALTER TABLE articles ADD COLUMN wid_mm REAL NOT NULL DEFAULT 70.0")
+        shape_cols_added = True
+    if "h_mm" not in art_cols:
+        con.execute("ALTER TABLE articles ADD COLUMN h_mm REAL NOT NULL DEFAULT 40.0")
+        shape_cols_added = True
+    if "holes" not in art_cols:
+        con.execute("ALTER TABLE articles ADD COLUMN holes INTEGER NOT NULL DEFAULT 2")
+        shape_cols_added = True
+    if shape_cols_added:
+        # ALTER TABLE's DEFAULT backfills every existing row with the SAME
+        # generic value -- that would leave the four seeded references
+        # visually identical to identify_core (a live database from before
+        # contract 1.7 has real box history to preserve, so this cannot be
+        # a plain reseed). Overwrite the four KNOWN references with their
+        # real signatures from ARTICLES; anything else (a reference added
+        # at the venue) keeps the generic default, honestly -- it was never
+        # given a real shape either.
+        con.executemany(
+            "UPDATE articles SET len_mm=?, wid_mm=?, h_mm=?, holes=? WHERE ref=?",
+            [(a[4], a[5], a[6], a[7], a[0]) for a in ARTICLES])
     con.commit()
 
 
@@ -221,8 +271,9 @@ def seed(con: sqlite3.Connection, keep_articles: bool = False) -> None:
         if not keep_articles:
             con.execute("DELETE FROM articles")
             con.executemany(
-                "INSERT INTO articles(ref,label,unit_mass_g,tolerance_g,color)"
-                " VALUES (?,?,?,?,?)", ARTICLES)
+                "INSERT INTO articles(ref,label,unit_mass_g,tolerance_g,"
+                "len_mm,wid_mm,h_mm,holes,color) VALUES (?,?,?,?,?,?,?,?,?)",
+                ARTICLES)
         con.execute("DELETE FROM meta")
         rows = []
         for f in range(C.FACES):
@@ -325,7 +376,9 @@ def meta_set(con, key: str, value) -> None:
 def add_article(con, ref: str, label: str, unit_mass_g: float,
                 tolerance_g: float | None = None,
                 cure_floor_h: float | None = None,
-                color: str | None = None) -> dict:
+                color: str | None = None,
+                len_mm: float | None = None, wid_mm: float | None = None,
+                h_mm: float | None = None, holes: int | None = None) -> dict:
     """Register a new reference/type. Raises ValueError on a bad or
     duplicate ref -- the caller (the REST handler) turns that into a 400.
 
@@ -349,11 +402,20 @@ def add_article(con, ref: str, label: str, unit_mass_g: float,
         if not color:
             n = con.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
             color = NEW_REF_PALETTE[n % len(NEW_REF_PALETTE)]
+        # A reference added at the venue has no real shape data -- default to
+        # a generic crate-sized signature so identify_core() has SOMETHING
+        # to match against rather than crashing on a missing key. It will
+        # simply be a weak/ambiguous vision match until someone measures the
+        # real part, which is honest: the system was never shown its shape.
         con.execute(
             "INSERT INTO articles(ref,label,unit_mass_g,tolerance_g,"
-            "cure_floor_h,color) VALUES (?,?,?,?,?,?)",
-            (ref, label, float(unit_mass_g), float(tolerance_g),
-             C.CURE_H, color))
+            "cure_floor_h,len_mm,wid_mm,h_mm,holes,color) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ref, label, float(unit_mass_g), float(tolerance_g), C.CURE_H,
+             float(len_mm) if len_mm else 100.0,
+             float(wid_mm) if wid_mm else 70.0,
+             float(h_mm) if h_mm else 40.0,
+             int(holes) if holes is not None else 2, color))
     return one(con, "SELECT * FROM articles WHERE ref=?", (ref,))
 
 

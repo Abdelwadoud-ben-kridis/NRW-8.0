@@ -3,7 +3,86 @@
 Owner: **P3 (dashboard / backend / site)**. Everyone codes against this file.
 If you change it, announce it out loud and bump the version line.
 
-    CONTRACT VERSION: 1.6
+    CONTRACT VERSION: 1.7
+
+Changes from 1.6 (simulated vision cross-check, partial FIFO picks, batch
+stock protection, and a way out of quarantine, 2026-09-13):
+
+- **A simulated vision station now backs up the barcode** (criterion 2,
+  "voir, identifier"). `backend/plant.py::simulate_vision` produces one
+  shape+count reading per arrival (`len_mm`/`wid_mm`/`h_mm`/`holes`, plus
+  `count_visible`) alongside the load-cell script, and `algo/engine.py::
+  identify_core` matches it against the catalogue's own shape signatures
+  (`articles.len_mm/wid_mm/h_mm/holes`, new columns). `backend/warehouse.py::
+  create_box` passes the result into `assess_box`, which now:
+    - **quarantines immediately if vision names a DIFFERENT reference** than
+      the barcode declares, regardless of what the weight math says. This
+      closes a real gap: for specific quantities, a wrong-reference swap
+      could coincidentally land on a clean multiple of the wrong reference's
+      mass and pass a weight-only check (finding: 1 case in 4 for the
+      `mismatch` anomaly at certain quantities). `backend/plant.py::
+      pick_swap_article` picks which real OTHER reference physically ends
+      up in a `mismatch` crate, deterministically, and both the load-cell
+      script and the vision reading agree on it.
+    - **uses the vision core count as a second, independent measurement**
+      of quantity. A weight reading that fails the tight zero-vision
+      tolerance is no longer an automatic quarantine if vision confirms a
+      close count (within 1-2 cores) -- it is accepted at MOYENNE using the
+      more conservative figure. This is the fix for a real false-quarantine
+      problem: at realistic ~3% per-core mass variance, the old
+      weight-only tolerance wrongly quarantined 25-60% of honest boxes at
+      some quantities; two independent sensors agreeing rescues them, and a
+      gap of 3+ cores between the two sensors is still a hard quarantine
+      (a disagreement that big is not plausible sensor noise).
+  New box columns: `vision_ref`, `id_confidence`. `boxes.count_beam` is
+  gone from every code path that matters (still 0 in the schema for
+  compatibility) -- weight is the ESP32's only sensor; the second count
+  comes from vision, not a beam.
+- **FIFO picks are PARTIAL again, reversing contract 1.3.**
+  `algo/engine.py::fifo_allocate` now takes only what a demand needs from
+  each box in FIFO order -- `qty_allocated` lands exactly on
+  `qty_requested` whenever the pipeline can cover it, instead of rounding
+  up to the next whole box. The remainder of a partially-picked box stays
+  `READY` at its ORIGINAL `t_in_sim` (this was already how `apply_pick`
+  behaved; `fifo_allocate` simply generates a partial `take` again). A
+  pick's shape gains `"partial": bool`.
+- **A box tagged to a production batch (`boxes.batch_id`) is no longer
+  general stock.** `fifo_allocate` excludes it entirely (new rejection
+  reason `"reserve au lot"`), and `backend/warehouse.py::reserve`'s pipeline
+  check for opening a NEW batch also excludes it. Finding fixed: a batch's
+  own boxes used to be reachable by an unrelated demand, and the batch then
+  shipped short with no warning. New consistency check `O5` proves this
+  mechanically (no `batch_id` box is ever `RESERVED`).
+- **An `IMPOSSIBLE` allocation now says WHEN, not just NO.** The result
+  gains `"eta_sim"`: the simulated time the curing pipeline alone would
+  close the gap (walking `DRYING` boxes oldest-ready-first), or `null` if
+  even the whole pipeline can't (exactly the case where `reserve()` opens a
+  production batch instead).
+- **A ready batch ships itself.** `backend/warehouse.py::
+  auto_ship_ready_batches`, called from `loop_clock`, ships every
+  `IN_PRODUCTION` order that has nothing left `DRYING` without waiting for
+  a manual confirm -- matching what this document already claimed a batch
+  does. The manual ship button still works (confirming an already-shipped
+  order is the existing idempotent no-op).
+- **Quarantine is no longer a dead end.** Two new endpoints:
+  `POST /api/box/{id}/archive` (`QUARANTINE`/`EMPTY` -> `ARCHIVED`, closing
+  it out for good) and `POST /api/box/{id}/recount` (re-presents a
+  `QUARANTINE` box's evidence -- a re-weigh, optionally a fresh vision
+  reading -- through the same identification+quantity decision `create_box`
+  would have made; on success the box re-enters `DRYING` from
+  `t_in_sim = now`, same box, no second row). Only possible while the
+  box's own barcode is still known with a real reference. New events:
+  `box_archived`, `box_recount`. `algo/engine.py::_TRANSITIONS` gains
+  `QUARANTINE -> DRYING`.
+- **The raw MQTT frame carries an optional `"final": true` on its last
+  frame** (`scw/<S>/sim/raw`, §1.1) -- a limit-switch-style signal that the
+  crate has physically left the counting station, not a measurement. This
+  closes a real race: at the original 1.2 s stability timeout against a
+  ~1.4 s settle window, ordinary MQTT jitter could end a box early and
+  clip the last core, and an undercount could still look like a clean
+  whole number. `firmware/sketch.ino` (and `tools/fake_device.py`) shorten
+  their stability wait once `final` has arrived instead of depending
+  purely on the timeout, which stays only as a fallback.
 
 Changes from 1.5 (make-to-order batches; capacity and overflow storage
 removed, 2026-09-13):
@@ -222,15 +301,17 @@ first 10 minutes at the venue.
 
 ```json
 { "beam": 1, "load_mv": 1843, "t_c": 24.6, "rh": 52.0, "t_sim": 93600.0 }
+{ "load_mv": 1843, "t_c": 24.6, "rh": 52.0, "t_sim": 93601.0, "final": true }
 ```
 
 | field     | type  | meaning                                                        |
 |-----------|-------|----------------------------------------------------------------|
-| `beam`    | 0/1   | photoelectric barrier: 1 = clear, 0 = obstructed by a core      |
+| `beam`    | 0/1   | legacy/unused (contract 1.7 -- weight is the only sensor); still accepted if present, never read |
 | `load_mv` | int   | load-cell amplifier output, 0..3300 mV (0 mV = 0 g, 3300 = 30 kg)|
 | `t_c`     | float | ambient temperature in the curing room, °C                      |
 | `rh`      | float | relative humidity, %                                            |
 | `t_sim`   | float | simulated clock, seconds. **Never wall clock.**                 |
+| `final`   | bool, optional | contract 1.7: set only on the LAST frame of an arrival -- a limit-switch-style "the crate has left the counting station" signal, not a measurement. Lets the firmware shorten its stability wait instead of relying purely on a timeout that ordinary MQTT jitter could clip a core off of. Omitted/false on every other frame. |
 
 Mass conversion used by BOTH sides (hard-coded constant, do not change after H2):
 
@@ -312,6 +393,8 @@ it never crashes the MQTT listener, and telemetry/curing keep running.
 | GET    | `/api/events?limit=200` | –                                    | event log |
 | GET    | `/api/db/check`       | –                                      | read-only consistency report (§7 below) |
 | GET    | `/api/db/box/{id}`    | –                                      | one box's row + slot + every event/order that names it |
+| POST   | `/api/box/{id}/archive` | –                                     | contract 1.7: `QUARANTINE`/`EMPTY` -> `ARCHIVED`, closing the box out for good -- `{"ok":true,"box_id":...,"state":"ARCHIVED"}`, or `{"error":...}` (404 unknown box, 409 wrong state) |
+| POST   | `/api/box/{id}/recount` | `{"gross_g":9420.5}`, optional `{"anomaly":"none"}` to also take a fresh simulated vision reading | contract 1.7: re-presents a `QUARANTINE` box's evidence through the same identification+quantity decision as a fresh arrival. `{"ok":true,"accepted":bool,...}` -- on success the box re-enters `DRYING` from `t_in_sim = now`; on failure it stays `QUARANTINE` with updated evidence. `{"error":...}` (404 unknown box; 409 wrong state, or no known/valid barcode to recount against) |
 
 `POST /api/articles` — `ref`, `label`, `unit_mass_g` are required; `tolerance_g`
 (default ~3 % of `unit_mass_g`) and `color` (default: next unused colour from
@@ -382,8 +465,19 @@ Box object (this exact shape is what the 3D twin and the table both read):
   "ready_at_sim":102240.0, "cure_pct":38.5,
   "count_beam":0, "count_weight":37, "gross_g":9420.5,
   "confidence":"HAUTE", "reason":null,
+  "vision_ref":"NY-114", "id_confidence":"HAUTE",
   "locked_by":null, "lock_expires_sim":null }
 ```
+
+`vision_ref`/`id_confidence` (contract 1.7) are the simulated vision
+station's own read on this box's reference and how confident that match
+was (`algo/engine.py::identify_core`) -- both `null` when no vision reading
+was taken for this arrival (the manual "quick box" shortcut has no camera
+either). `confidence` remains the QUANTITY confidence (weight, optionally
+rescued or overruled by the vision core count); `id_confidence` is a
+separate, IDENTIFICATION confidence -- the two answer different questions
+and can disagree (e.g. `id_confidence` HAUTE with `confidence` MOYENNE: the
+camera is sure this is the right part, but the two counts differ by one).
 
 `code` is the `barcode_id` the conveyor's scanner read off this physical
 crate (contract 1.5) — a worker registered it, with its own per-noyau
@@ -418,24 +512,38 @@ Client → server (rare; most client actions go through REST):
   "qty_requested": 40,
   "qty_allocated": 40,
   "shortfall": 0,
+  "eta_sim": null,
   "picks": [
-    {"box_id":"BOX-4","slot_id":"F0-C1-L2","take":22,"t_in_sim":3600.0,"rank":1},
-    {"box_id":"BOX-9","slot_id":"F1-C5-L9","take":18,"t_in_sim":9000.0,"rank":2}
+    {"box_id":"BOX-4","slot_id":"F0-C1-L2","take":22,"t_in_sim":3600.0,"rank":1,"partial":false},
+    {"box_id":"BOX-9","slot_id":"F1-C5-L9","take":18,"t_in_sim":9000.0,"rank":2,"partial":true}
   ],
   "rejected": [
     {"box_id":"BOX-7","reason":"sechage insuffisant","detail":"pret dans 4.2 h"},
-    {"box_id":"BOX-2","reason":"quarantaine","detail":"ecart de comptage = 3 (barriere 30 / pesee 27)"},
+    {"box_id":"BOX-2","reason":"quarantaine","detail":"ecart de comptage : pesee 30, vision 27 noyaux"},
     {"box_id":"BOX-11","reason":"reserve","detail":"ORD-2"},
-    {"box_id":"BOX-15","reason":"plus recent (FIFO)","detail":"besoin deja couvert par des box plus anciens"}
+    {"box_id":"BOX-14","reason":"reserve au lot","detail":"ORD-5"},
+    {"box_id":"BOX-15","reason":"plus recent (FIFO)","detail":"besoin deja couvert par des box plus anciennes"}
   ],
   "status": "PENDING"
 }
 ```
 
-Each `take` is always the picked box's **entire** `qty_available` (§6 rule
-7) — `fifo_allocate` never splits a box, so `qty_allocated` can land above
-`qty_requested` when the last whole box needed to cover the order is bigger
-than what was still missing.
+Picks are **partial FIFO** (contract 1.7, reversing 1.3's whole-box-only
+rule): `take` is only what the order still needs from that box once
+earlier picks are counted, so `qty_allocated` lands exactly on
+`qty_requested` whenever the pipeline can cover it — the box carrying the
+last, smaller `take` is marked `"partial": true` and keeps its remainder
+`READY` at its ORIGINAL `t_in_sim`, still first in line for the next
+demand. A box already tagged to another order's production batch
+(`"reserve au lot"`) is excluded from `pickable` entirely — it is not
+general stock (§6 rule 8b).
+
+When nothing is pickable (`status: "IMPOSSIBLE"`), `eta_sim` (contract 1.7)
+names the simulated time the curing pipeline ALONE would close the gap
+(walking `DRYING` boxes oldest-ready-first from whatever is already READY),
+or `null` when even the whole pipeline can't — exactly the situation
+`backend/warehouse.py::reserve` answers by opening a production batch
+instead. `eta_sim` is `null` on every other status.
 
 If `fifo_allocate` finds nothing pickable (`picks: []`), `backend/warehouse.py
 ::reserve` looks at the WHOLE pipeline for that ref next (§6 rule 8):
@@ -465,23 +573,33 @@ enforced instead of taking your word for it. Render it on screen, always.
 
 ```sql
 articles(ref PK, label, unit_mass_g REAL, tolerance_g REAL,
-         cure_floor_h REAL DEFAULT 24.0, color TEXT)
+         cure_floor_h REAL DEFAULT 24.0,
+         len_mm REAL, wid_mm REAL, h_mm REAL, holes INT, color TEXT)
   -- no box_capacity (contract 1.6) -- nobody knows how many cores are in a
-  -- box ahead of time, that's what the scale is for.
+  -- box ahead of time, that's what the scale is for. len_mm/wid_mm/h_mm/
+  -- holes (contract 1.7) are the shape signature algo/engine.py::
+  -- identify_core matches a simulated vision reading against.
 
 boxes(box_id PK, article_ref FK NULL, qty_initial INT, qty_available INT,
       slot_id FK NULL, state TEXT, t_in_sim REAL, required_cure_h REAL,
       ready_at_sim REAL, count_beam INT, count_weight INT, gross_g REAL,
       confidence TEXT, reason TEXT, locked_by TEXT NULL,
-      lock_expires_sim REAL NULL, code TEXT NULL, batch_id TEXT NULL)
-  -- article_ref is NULL only while state='QUARANTINE' (unknown/reused
-  -- barcode, contract 1.5). A partial unique index on slot_id (WHERE NOT
-  -- NULL) makes "one box per slot" DB-enforced, not just convention.
+      lock_expires_sim REAL NULL, code TEXT NULL, batch_id TEXT NULL,
+      vision_ref TEXT NULL, id_confidence TEXT NULL)
+  -- article_ref is NULL only while state='QUARANTINE' or 'ARCHIVED' (an
+  -- unknown/reused-barcode quarantine, contract 1.5, that was later closed
+  -- out via archive_box without ever being identified, contract 1.7). A
+  -- partial unique index on slot_id (WHERE NOT NULL) makes "one box per
+  -- slot" DB-enforced, not just convention.
   -- `code` is the barcode_id the conveyor's scanner read off this crate
   -- (contract 1.5) -- never read back to make a decision. `batch_id`
   -- (contract 1.6) is the IN_PRODUCTION order this box was produced for,
-  -- when existing stock couldn't cover a demand; NULL for ordinary stock.
+  -- when existing stock couldn't cover a demand; NULL for ordinary stock;
+  -- such a box is invisible to every OTHER order's allocation (contract 1.7).
   -- `count_beam` is always 0, kept only for API/schema compatibility.
+  -- `vision_ref`/`id_confidence` (contract 1.7) are the simulated vision
+  -- station's own identification read on this box, independent of the
+  -- barcode -- both NULL when no vision reading was taken.
 
 slots(slot_id PK, face INT, col INT, level INT,
       occupied_by FK NULL, reserved_for FK NULL)
@@ -516,7 +634,10 @@ meta(k PK, v)
 **Persisted states** — what `boxes.state` actually holds:
 `DRYING → READY → RESERVED → (partial → READY, t_in unchanged | full →
 EMPTY) → ARCHIVED`, plus `QUARANTINE` (a box is born directly into
-`DRYING` or `QUARANTINE`; `ARCHIVED` has no endpoint yet).
+`DRYING` or `QUARANTINE`). Contract 1.7 adds two ways out of `QUARANTINE`:
+`POST /api/box/{id}/archive` (`QUARANTINE`/`EMPTY` → `ARCHIVED`, terminal)
+and `POST /api/box/{id}/recount` (`QUARANTINE` → `DRYING` on a successful
+re-weigh, `t_in_sim` reset to the recount time).
 
 `INCOMING → IDENTIFYING → COUNTING → STORING` and `PICKING` are **virtual**
 stages — real-world moments narrated in event payloads (`box_in`'s
@@ -571,15 +692,29 @@ to general stock instead of discarding them.
    on an order already in its target state is a no-op; applying either to
    an order in the wrong state is refused (409), never silently applied to
    whatever the boxes happen to be now.
-7. **A pick never splits a box** (contract 1.3): `take` is always a box's
-   whole `qty_available`.
+7. **A pick is partial FIFO** (contract 1.7, reversing 1.3): `take` is only
+   what the demand still needs from that box once earlier picks are
+   counted, so `qty_allocated` lands exactly on `qty_requested` whenever
+   the pipeline can cover it. The box carrying the last, smaller `take` is
+   marked `partial: true` and keeps its remainder `READY` at its ORIGINAL
+   `t_in_sim` — the same FIFO position it already had.
 8. **Demand is FIFO-first, make-to-order for the shortfall** (contract
-   1.6): if the ref's total pipeline (every non-`QUARANTINE` box, curing or
-   reserved included, not just currently-free) can't reach `qty_requested`,
-   the order opens a production batch (`IN_PRODUCTION`) instead of being
-   refused. If enough already exists somewhere in the pipeline — just not
-   free yet — nothing changes: the order stays `IMPOSSIBLE`, `picks: []`,
-   with the ordinary drying/reserved refusal reasons.
+   1.6): if the ref's total pipeline (every non-`QUARANTINE`,
+   non-`batch_id` box, curing or reserved included, not just
+   currently-free) can't reach `qty_requested`, the order opens a
+   production batch (`IN_PRODUCTION`) instead of being refused. If enough
+   already exists somewhere in the pipeline — just not free yet — nothing
+   changes: the order stays `IMPOSSIBLE`, `picks: []`, with the ordinary
+   drying/reserved refusal reasons (and `eta_sim` naming when the pipeline
+   alone would close the gap, contract 1.7).
+8b. **A box tagged to a production batch is not general stock** (contract
+   1.7): `fifo_allocate` excludes any box with `batch_id` set from
+   `pickable` entirely (reason `"reserve au lot"`), and the pipeline check
+   in rule 8 excludes it too — one demand can no longer reserve or count
+   toward its own coverage a box another order is waiting on. A ready
+   batch also ships itself once nothing it produced is still `DRYING`
+   (`backend/warehouse.py::auto_ship_ready_batches`, called from
+   `loop_clock`), without needing a manual confirm.
 9. Every backend operation that touches more than one row runs inside one
    database transaction (`backend/db.py::transaction`, used throughout
    `backend/warehouse.py`) — a crash or a refused precondition leaves
@@ -591,7 +726,7 @@ to general stock instead of discarding them.
 
 ## 7. Consistency checker
 
-`GET /api/db/check` (`backend/consistency.py`) runs 25 read-only checks —
+`GET /api/db/check` (`backend/consistency.py`) runs 29 read-only checks —
 foreign-key-style integrity, box/order state shape, lock consistency, cure
 timing, article sanity — and returns `{"overall": "PASS"|"WARN"|"FAIL",
 "t_sim", "checks": [{"id","severity","count","offending","message"}]}`.

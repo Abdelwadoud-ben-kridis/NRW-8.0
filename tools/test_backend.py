@@ -133,10 +133,11 @@ def test_double_confirm_deducts_once():
         check("first confirm applies", r1["already"] is False)
         check("second confirm is a no-op", r2["already"] is True)
         row = DB.one(con, "SELECT * FROM boxes WHERE box_id='BOX-1'")
-        # the whole box is taken (never split), so one confirm empties it;
-        # the point of this test is that the SECOND confirm doesn't try to
-        # deduct another 40 and drive qty_available negative
-        check("qty deducted exactly once", row["qty_available"] == 0, row["qty_available"])
+        # A pick is partial FIFO (contract 1.7): only the 10 requested come
+        # out of the 40-core box, leaving 30 behind, READY, at their
+        # original t_in_sim. The point of this test is that the SECOND
+        # confirm doesn't try to deduct another 10 on top of that.
+        check("qty deducted exactly once", row["qty_available"] == 30, row["qty_available"])
         assert_pass(con, 100 * H, "double confirm")
     finally:
         cleanup(con)
@@ -209,21 +210,45 @@ def test_reservation_expiry_cancels_order_and_releases_box():
         cleanup(con)
 
 
-def test_whole_box_pick_overshoots_and_empties_the_box():
-    # A box is never split (contract 1.3): reserving 10 out of a 40-core box
-    # takes the WHOLE box, overshooting qty_requested, rather than leaving
-    # 30 cores stranded in a half-picked crate.
+def test_partial_pick_leaves_the_remainder_ready_in_place():
+    # A pick is partial FIFO (contract 1.7, reversing 1.3): reserving 10 out
+    # of a 40-core box takes only the 10 needed, leaving 30 behind in the
+    # SAME box/slot, READY, instead of overshooting to 40 or stranding the
+    # box half-picked in limbo.
     con = fresh_con()
     try:
         W.create_box(con, 0.0, _bc(con), C.TARE_G + 40 * 206.0, "test")
         DB.update(con, "boxes", "box_id", "BOX-1", {"state": "READY"})
         plan = W.reserve(con, 100 * H, "NY-114", 10)
-        check("rounds up to the whole box (40, not 10)", plan["qty_allocated"] == 40)
+        check("allocates exactly what was requested", plan["qty_allocated"] == 10)
+        check("marked as a partial pick", plan["picks"][0]["partial"] is True)
         W.confirm(con, 100 * H, plan["order_id"])
         box = DB.one(con, "SELECT * FROM boxes WHERE box_id='BOX-1'")
-        check("box fully emptied, not split", box["state"] == "EMPTY")
-        check("slot released", box["slot_id"] is None)
-        assert_pass(con, 100 * H, "whole-box pick")
+        check("box stays READY with the remainder", box["state"] == "READY")
+        check("30 cores left", box["qty_available"] == 30)
+        check("slot kept, not released", box["slot_id"] == "F0-C1-L1")
+        assert_pass(con, 100 * H, "partial pick")
+    finally:
+        cleanup(con)
+
+
+def test_partial_pick_remainder_is_still_first_out_next_time():
+    # Same box picked twice: the leftover 30 keep the ORIGINAL t_in_sim, so
+    # a newer box of the same reference still loses the FIFO race to them.
+    con = fresh_con()
+    try:
+        W.create_box(con, 0.0, _bc(con), C.TARE_G + 40 * 206.0, "test")
+        DB.update(con, "boxes", "box_id", "BOX-1", {"state": "READY"})
+        W.confirm(con, 100 * H, W.reserve(con, 100 * H, "NY-114", 10)["order_id"])
+
+        bc2 = _bc(con)
+        W.create_box(con, 5 * H, bc2, C.TARE_G + 50 * 206.0, "test")
+        DB.update(con, "boxes", "box_id", "BOX-2", {"state": "READY"})
+
+        plan = W.reserve(con, 100 * H, "NY-114", 20)
+        check("still takes the older box first", plan["picks"][0]["box_id"] == "BOX-1")
+        check("takes only the remaining 20 from it", plan["picks"][0]["take"] == 20)
+        assert_pass(con, 100 * H, "partial pick FIFO order preserved")
     finally:
         cleanup(con)
 
@@ -494,6 +519,111 @@ def test_produce_for_batch_refuses_a_non_production_order():
             check("producing against a PENDING order raises", False)
         except W.OpError as e:
             check("producing against a PENDING order raises", e.code == 409)
+    finally:
+        cleanup(con)
+
+
+def test_batch_boxes_cannot_be_stolen_by_another_demand():
+    # finding fixed by contract 1.7: a box produced for one order's
+    # production batch used to be reachable by fifo_allocate for a totally
+    # different demand, letting the batch ship short with no warning.
+    con = fresh_con()
+    try:
+        plan = W.reserve(con, 0.0, "NY-114", 30)
+        order_id = plan["order_id"]
+        b1 = W.produce_for_batch(con, 0.0, order_id, _bc(con), C.TARE_G + 30 * 206.0, "test")
+
+        past_cure = 30 * H
+        stolen = W.reserve(con, past_cure, "NY-114", 5)
+        check("a fresh demand cannot pick the batch's box",
+             not any(p["box_id"] == b1["box_id"] for p in stolen["picks"]))
+        check("fresh demand instead opens its OWN batch",
+             stolen["status"] == "IN_PRODUCTION", stolen)
+        assert_pass(con, past_cure, "batch box not stolen")
+    finally:
+        cleanup(con)
+
+
+def test_auto_ship_ready_batches_ships_without_a_manual_confirm():
+    con = fresh_con()
+    try:
+        plan = W.reserve(con, 0.0, "NY-114", 30)
+        order_id = plan["order_id"]
+        W.produce_for_batch(con, 0.0, order_id, _bc(con), C.TARE_G + 30 * 206.0, "test")
+
+        past_cure = 30 * H
+        shipped = W.auto_ship_ready_batches(con, past_cure)
+        check("auto-ship reports the batch", any(s["order_id"] == order_id for s in shipped))
+        row = DB.one(con, "SELECT * FROM orders WHERE order_id=?", (order_id,))
+        check("order is DONE with no manual confirm", row["status"] == "DONE")
+        assert_pass(con, past_cure, "auto-ship")
+    finally:
+        cleanup(con)
+
+
+def test_auto_ship_is_a_no_op_while_still_curing():
+    con = fresh_con()
+    try:
+        plan = W.reserve(con, 0.0, "NY-114", 30)
+        order_id = plan["order_id"]
+        W.produce_for_batch(con, 0.0, order_id, _bc(con), C.TARE_G + 30 * 206.0, "test")
+        shipped = W.auto_ship_ready_batches(con, 1.0 * H)
+        check("nothing shipped while still drying", shipped == [])
+        row = DB.one(con, "SELECT * FROM orders WHERE order_id=?", (order_id,))
+        check("order still IN_PRODUCTION", row["status"] == "IN_PRODUCTION")
+    finally:
+        cleanup(con)
+
+
+def test_archive_box_closes_out_a_quarantined_box():
+    con = fresh_con()
+    try:
+        res = W.create_box(con, 0.0, "no-such-barcode", C.TARE_G + 100.0, "test")
+        check("unknown barcode quarantined", res["state"] == "QUARANTINE")
+        out = W.archive_box(con, 1.0, res["box_id"])
+        check("archived", out["state"] == "ARCHIVED")
+        row = DB.one(con, "SELECT * FROM boxes WHERE box_id=?", (res["box_id"],))
+        check("state persisted as ARCHIVED", row["state"] == "ARCHIVED")
+        try:
+            W.archive_box(con, 2.0, res["box_id"])
+            check("archiving an already-archived box raises", False)
+        except W.OpError as e:
+            check("archiving an already-archived box raises", e.code == 409)
+        assert_pass(con, 2.0, "archive")
+    finally:
+        cleanup(con)
+
+
+def test_recount_box_accepts_a_good_reweigh():
+    # A box quarantined on a mismeasured weight can be re-weighed and
+    # re-enter the normal cure cycle (contract 1.7) -- quarantine is no
+    # longer a dead end for a box whose barcode is still known.
+    con = fresh_con()
+    try:
+        bc = _bc(con)
+        bad = W.create_box(con, 0.0, bc, C.TARE_G + 999.0, "test")
+        check("bad weighing quarantined", bad["state"] == "QUARANTINE")
+        out = W.recount_box(con, 1.0, bad["box_id"], C.TARE_G + 40 * 206.0)
+        check("recount accepted", out["accepted"] is True, out)
+        row = DB.one(con, "SELECT * FROM boxes WHERE box_id=?", (bad["box_id"],))
+        check("box now DRYING with a real slot",
+             row["state"] == "DRYING" and row["slot_id"] is not None)
+        check("qty from the corrected weight", row["qty_available"] == 40)
+        check("t_in_sim re-stamped to the recount time", row["t_in_sim"] == 1.0)
+        assert_pass(con, 1.0, "recount accepted")
+    finally:
+        cleanup(con)
+
+
+def test_recount_box_refuses_without_a_known_barcode():
+    con = fresh_con()
+    try:
+        res = W.create_box(con, 0.0, "no-such-barcode", C.TARE_G + 100.0, "test")
+        try:
+            W.recount_box(con, 1.0, res["box_id"], C.TARE_G + 40 * 206.0)
+            check("recount without a real barcode raises", False)
+        except W.OpError as e:
+            check("recount without a real barcode raises", e.code == 409)
     finally:
         cleanup(con)
 

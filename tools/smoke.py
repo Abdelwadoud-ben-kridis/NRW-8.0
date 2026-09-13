@@ -63,28 +63,30 @@ st = call("/api/state")
 check("boxes cured on their own",
       sum(1 for b in st["boxes"] if b["state"] == "READY") == 2)
 
-# 4. FIFO: oldest first, across two boxes. A box is never split (contract
-#    1.3), so covering 30 needs both whole boxes -- 22 + 18 = 40, rounding
-#    up rather than splitting BOX-2 to hand out exactly 30.
+# 4. FIFO: oldest first, across two boxes. Picks are partial (contract 1.7,
+#    reversing 1.3): covering 30 takes BOX-1 whole (22) and only 8 of
+#    BOX-2's 18, landing exactly on 30 instead of rounding up to 40.
 plan = call("/api/demand", {"ref": "NY-114", "qty": 30})
-check("rounds up to 40 (never splits a box)", plan["qty_allocated"] == 40, plan["qty_allocated"])
+check("lands exactly on 30 (partial pick)", plan["qty_allocated"] == 30, plan["qty_allocated"])
 check("oldest box first", plan["picks"][0]["box_id"] == "BOX-1",
       [p["box_id"] for p in plan["picks"]])
 check("spans two boxes", len(plan["picks"]) == 2)
-check("takes whole boxes 22 then 18", [p["take"] for p in plan["picks"]] == [22, 18],
+check("takes 22 then only the 8 needed", [p["take"] for p in plan["picks"]] == [22, 8],
       [p["take"] for p in plan["picks"]])
+check("second pick is marked partial", plan["picks"][1]["partial"] is True)
 
 st = call("/api/state")
 check("picked boxes are RESERVED",
       sum(1 for b in st["boxes"] if b["state"] == "RESERVED") == 2)
 
-# 5. confirm -> both boxes are taken whole, so both empty and release their slot
+# 5. confirm -> BOX-1 taken whole (empties), BOX-2 keeps its remaining 10
 call("/api/demand/confirm", {"order_id": plan["order_id"]})
 st = call("/api/state")
 b1 = [b for b in st["boxes"] if b["box_id"] == "BOX-1"][0]
 b2 = [b for b in st["boxes"] if b["box_id"] == "BOX-2"][0]
 check("BOX-1 emptied and released its slot", b1["state"] == "EMPTY" and not b1["slot_id"])
-check("BOX-2 emptied and released its slot", b2["state"] == "EMPTY" and not b2["slot_id"])
+check("BOX-2 keeps its remainder, still slotted",
+      b2["state"] == "READY" and b2["qty_available"] == 10 and b2["slot_id"])
 
 # 6. quarantine path
 call("/api/reset", {})
@@ -122,9 +124,10 @@ check("first confirm applies", r1.get("already") is False, r1)
 check("second confirm is a no-op, not an error", r2.get("already") is True, r2)
 st = call("/api/state")
 box1 = [b for b in st["boxes"] if b["box_id"] == "BOX-1"][0]
-# the whole 40-core box is taken (never split, contract 1.3) -- what this
-# test is really proving is that the SECOND confirm doesn't deduct again
-check("qty deducted exactly once", box1["qty_available"] == 0, box1["qty_available"])
+# only the 10 requested come out of the 40-core box (partial FIFO, contract
+# 1.7) -- what this test is really proving is that the SECOND confirm
+# doesn't deduct another 10 on top of that
+check("qty deducted exactly once", box1["qty_available"] == 30, box1["qty_available"])
 
 # confirming a cancelled order is refused, not silently applied
 call("/api/reset", {})
@@ -172,7 +175,35 @@ bad = [b for b in st["boxes"] if b["state"] == "QUARANTINE"]
 check("unknown barcode quarantined", len(bad) == 1, bad)
 check("does not pollute NY-114's article", bad[0]["ref"] is None, bad[0]["ref"])
 
-# 12. the read-only consistency checker (backend/consistency.py) is green
+# 12. quarantine is not a dead end (contract 1.7): a box quarantined for a
+# bad reason can be re-presented and re-enter the cure cycle. This one is
+# quarantined via a "mismatch" arrival (vision sees the wrong reference),
+# then recounted with a FRESH vision reading and no explicit "qty" --
+# regression check for a real bug: the recount endpoint used to default
+# that quantity to 0, which fabricated a huge, spurious vision/weight gap
+# and wrongly re-quarantined an otherwise good recount.
+call("/api/reset", {})
+call("/api/barcodes", {"barcode_id": "BC-RECOUNT", "ref": "NY-114", "unit_mass_g": 206.0})
+call("/api/sim/arrival", {"barcode_id": "BC-RECOUNT", "qty": 37, "anomaly": "mismatch"})
+st = call("/api/state")
+bad_box = [b for b in st["boxes"] if b["code"] == "BC-RECOUNT"][0]
+check("mismatch arrival quarantined", bad_box["state"] == "QUARANTINE", bad_box)
+recount = call("/api/box/%s/recount" % bad_box["box_id"],
+              {"gross_g": 9427.0, "anomaly": "none"})
+check("recount with a fresh vision reading, no explicit qty, is accepted",
+      recount.get("accepted") is True, recount)
+st = call("/api/state")
+recovered = [b for b in st["boxes"] if b["box_id"] == bad_box["box_id"]][0]
+check("box re-entered DRYING", recovered["state"] == "DRYING", recovered)
+
+# 13. archiving a dead-end quarantine box closes it out for good
+call("/api/sim/box", {"barcode_id": "BC-NEVER-REGISTERED-2", "qty": 5})
+st = call("/api/state")
+ghost = [b for b in st["boxes"] if b["code"] == "BC-NEVER-REGISTERED-2"][0]
+archived = call("/api/box/%s/archive" % ghost["box_id"], {})
+check("archive succeeds", archived.get("state") == "ARCHIVED", archived)
+
+# 14. the read-only consistency checker (backend/consistency.py) is green
 chk = call("/api/db/check")
 check("consistency checker: overall PASS", chk["overall"] == "PASS",
       [c for c in chk["checks"] if c["severity"] != "PASS"])
