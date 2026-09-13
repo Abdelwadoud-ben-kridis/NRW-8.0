@@ -805,10 +805,9 @@ async def api_demand(body: dict):
 
     plan = W.reserve(con, clock.t_sim, ref, qty)
     STATE["last_order"] = plan
-    if plan["picks"]:
-        STATE["crane"] = {"cmd": "pick", "box_id": plan["picks"][0]["box_id"],
-                          "slot_id": plan["picks"][0]["slot_id"],
-                          "seq": STATE["crane"]["seq"] + 1}
+    # The crane doesn't move on a reservation -- it's a soft hold on stock,
+    # not a physical action yet. It moves on confirm (below), so clicking
+    # Confirm actually reads as "this is doing the pickup", not a no-op.
     await broadcast()
     return plan
 
@@ -829,6 +828,13 @@ async def api_confirm(body: dict):
     if not res["already"]:
         STATE["banner"] = {"kind": "ok", "text": "%s servie: %d noyaux preleves"
                            % (oid, plan["qty_allocated"]), "t_sim": clock.t_sim}
+        # The crane physically moves now, not at reservation time -- see the
+        # note in api_demand. Batch shipments (IN_PRODUCTION -> _ship_batch)
+        # move several boxes at once, so there's no single "the" pick to cue.
+        if plan.get("picks"):
+            STATE["crane"] = {"cmd": "pick", "box_id": plan["picks"][0]["box_id"],
+                              "slot_id": plan["picks"][0]["slot_id"],
+                              "seq": STATE["crane"]["seq"] + 1}
     await broadcast()
     return res
 

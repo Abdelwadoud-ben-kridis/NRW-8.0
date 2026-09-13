@@ -32,7 +32,8 @@ export const EN = {
   demandAvail: (n) => `${n} in stock`,
   demandTooMuch: (n) => `Only ${n} in stock for this reference — cannot request more.`,
   warehouse: "Warehouse",
-  pendingOrders: "Pending reservations", lockExpiresIn: (s) => `expires in ${s} s`,
+  pendingOrders: "Ready to pick up", lockExpiresIn: (s) => `expires in ${s} s`,
+  pickupBtn: (qty) => `Confirm — pick up ${qty}`,
   batchesTitle: "Production batches", noBatches: "No open production batches.",
   batchOpened: "opened as a production batch — see below",
   batchReady: "ready to ship", batchCuring: "curing",
@@ -62,12 +63,11 @@ export const EN = {
   liveOperation: "Live operation", stageIdle: "SYSTEM NOMINAL",
   stageReceiving: "RECEIVING", stageCounting: "COUNTING",
   stageStabilizing: "STABILIZING", stageStoring: "STORING",
-  stageAllocating: "ALLOCATING", stageReserved: "RESERVED",
+  stageReserved: "RESERVED",
   stageConfirmed: "CONFIRMED", stageQuarantine: "QUARANTINE",
   stageFault: "FAULT", stageCuring: "CURING IN PROGRESS", stageReady: "READY",
   stageIdleSub: "no activity in progress",
   stageSub: "derived from ESP32 state, crane command and last order",
-  confirmSuggestion: (id, qty) => `Pickup ready — confirm ${id} (${qty} cores)?`,
 
   // --- ESP32 instrument panel -----------------------------------------------
   liveEsp32: "Live ESP32", beamCount: "cores (beam)", visionRef: "vision id",
@@ -102,7 +102,7 @@ export const EN = {
 
   // --- reservation panel ------------------------------------------------------
   orderExpired: "ORDER EXPIRED", reservationReleased: "RESERVATION RELEASED",
-  noPending: "No pending reservations.",
+  noPending: "Nothing ready to pick up yet.",
 
   // --- database health -------------------------------------------------------
   database: "Database",
@@ -199,7 +199,8 @@ export const FR = {
   demandAvail: (n) => `${n} en stock`,
   demandTooMuch: (n) => `Seulement ${n} en stock pour cette référence — impossible de demander plus.`,
   warehouse: "Entrepôt",
-  pendingOrders: "Réservations en attente",
+  pendingOrders: "Prêt à prélever",
+  pickupBtn: (qty) => `Valider — prélever ${qty}`,
   batchesTitle: "Lots de production", noBatches: "Aucun lot de production en cours.",
   batchOpened: "ouvert comme lot de production — voir ci-dessous",
   batchReady: "prêt à expédier", batchCuring: "en séchage",
@@ -229,12 +230,11 @@ export const FR = {
   liveOperation: "Opération en cours", stageIdle: "SYSTÈME NOMINAL",
   stageReceiving: "RÉCEPTION", stageCounting: "COMPTAGE",
   stageStabilizing: "STABILISATION", stageStoring: "RANGEMENT",
-  stageAllocating: "ALLOCATION", stageReserved: "RÉSERVÉ",
+  stageReserved: "RÉSERVÉ",
   stageConfirmed: "VALIDÉ", stageQuarantine: "QUARANTAINE",
   stageFault: "DÉFAUT", stageCuring: "SÉCHAGE EN COURS", stageReady: "PRÊT",
   stageIdleSub: "aucune activité en cours",
   stageSub: "déduit de l'état ESP32, de la commande du pont et de la commande en cours",
-  confirmSuggestion: (id, qty) => `Prélèvement prêt — valider ${id} (${qty} noyaux) ?`,
 
   // --- ESP32 instrument panel -----------------------------------------------
   liveEsp32: "ESP32 en direct", beamCount: "noyaux (barrière)", visionRef: "identification vision",
@@ -269,7 +269,7 @@ export const FR = {
 
   // --- reservation panel ------------------------------------------------------
   orderExpired: "COMMANDE EXPIRÉE", reservationReleased: "RÉSERVATION LIBÉRÉE",
-  noPending: "Aucune réservation en attente.",
+  noPending: "Rien à prélever pour l'instant.",
 
   // --- database health -------------------------------------------------------
   database: "Base de données",

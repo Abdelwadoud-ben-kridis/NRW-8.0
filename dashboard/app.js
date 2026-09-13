@@ -365,8 +365,10 @@ function deriveStage(st) {
     return ["active", L.stageStabilizing, L.stageSub];
   if (st.crane.cmd === "store" && craneRecent)
     return ["active", L.stageStoring, L.stageSub];
-  if (st.crane.cmd === "pick" && craneRecent && st.last_order && st.last_order.status === "PENDING")
-    return ["active", L.stageAllocating, L.stageSub];
+  // The crane only moves ON CONFIRM now (not at reservation) -- so "pick"
+  // pairs with a just-confirmed (DONE) order, not a still-PENDING one.
+  if (st.crane.cmd === "pick" && craneRecent && st.last_order && st.last_order.status === "DONE")
+    return ["active", L.stageConfirmed, L.stageSub];
   if (st.last_order && st.last_order.status === "PENDING")
     return ["curing", L.stageReserved, L.stageSub];
   if (st.kpi.boxes_drying > 0 && st.kpi.boxes_ready === 0 && !st.last_order)
@@ -408,19 +410,6 @@ function render(st) {
   $("stagecard").querySelector(".stagebox").className = "stagebox stage-" + cls;
   $("stage-label").textContent = label;
   $("stage-sub").textContent = sub;
-
-  // --- confirm suggestion: a fully-covered order is only ever confirmed
-  // by a click (never auto-confirmed) -- this just makes that click hard
-  // to miss instead of requiring the operator to notice a small button
-  // buried in the proposal panel or the pending-reservations list.
-  const readyOrder = st.last_order && st.last_order.status === "PENDING"
-    ? st.last_order : null;
-  const cta = $("stage-confirm-cta");
-  cta.hidden = !readyOrder;
-  if (readyOrder) {
-    cta.textContent = L.confirmSuggestion(readyOrder.order_id, readyOrder.qty_allocated);
-    cta.disabled = orderOpBusy;
-  }
 
   // --- ESP32 instrument panel ---
   const dev = st.device;
@@ -635,11 +624,12 @@ function renderPendingOrders(st) {
     const expired = remaining != null && remaining <= 0;
     return `<div class="resv-row" data-oid="${o.order_id}">
         <div class="resv-top">
-          <span class="ref">${o.order_id} · ${o.ref} · ${o.qty_allocated}/${o.qty_requested}</span>
+          <span class="ref">${o.order_id} · ${o.ref}</span>
           <span class="countdown ${cls}">${label}</span>
         </div>
         <div class="resv-actions">
-          <button class="ghost" data-act="confirm" ${busy || expired ? "disabled" : ""}>${L.confirm}</button>
+          <button class="primary pickup-confirm" data-act="confirm"
+            ${busy || expired ? "disabled" : ""}>${L.pickupBtn(o.qty_allocated)}</button>
           <button class="ghost" data-act="cancel" ${busy ? "disabled" : ""}>${L.cancel}</button>
         </div>
       </div>`;
@@ -1068,8 +1058,6 @@ async function boot() {
     api("/demand/confirm", { order_id: ST.last_order.order_id }).then(renderLog));
   guardedOrderOp($("btn-cancel"), () => ST?.last_order &&
     api("/demand/cancel", { order_id: ST.last_order.order_id }).then(renderLog));
-  guardedOrderOp($("stage-confirm-cta"), () => ST?.last_order &&
-    api("/demand/confirm", { order_id: ST.last_order.order_id }).then(renderLog));
 
   document.querySelectorAll("[data-cam]").forEach((b) =>
     b.onclick = () => setCamera(b.dataset.cam));
