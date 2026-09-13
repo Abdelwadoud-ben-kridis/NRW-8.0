@@ -295,6 +295,13 @@ def fifo_allocate(boxes: list, ref: str, qty: int, now_sim: float,
     for b in candidates:
         state = b["state"]
 
+        # self-healing: a box already past its 24 h floor is pickable even if
+        # its state column still says DRYING -- sweep_cured only flips the
+        # column on loop_clock's next 0.2 s tick, and demand must not depend
+        # on winning that race (e.g. D pressed right after a clock jump/J)
+        if state == "DRYING" and is_cured(b["t_in_sim"], b["required_cure_h"], now_sim):
+            state = "READY"
+
         if state in _NOT_PICKABLE:
             label, detail = _NOT_PICKABLE[state]
             if state == "DRYING":

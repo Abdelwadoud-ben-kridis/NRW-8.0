@@ -164,10 +164,15 @@ scw/
 │   ├── diagram.json        Wokwi wiring
 │   └── libraries.txt       PubSubClient · ArduinoJson · DHT sensor library
 └── tools/
-    ├── fake_device.py      Python ESP32 stand-in, byte-identical payloads
-    ├── smoke.py            REST end-to-end checks against a running backend
-    ├── test_backend.py     DB integration tests, no server needed
-    └── mqtt_probe.py       MQTT-layer dedup/malformed-payload checks
+    ├── fake_device.py          Python ESP32 stand-in, byte-identical payloads
+    ├── smoke.py                REST end-to-end checks against a running backend
+    ├── test_backend.py         DB integration tests, no server needed
+    ├── mqtt_probe.py           MQTT-layer dedup/malformed-payload checks
+    ├── l0_probe.py             proves the LIVE device path (L0), not just L1 --
+    │                           runs fake_device.py against a running backend
+    └── test_firmware_contract.py   static parity check: sketch.ino vs
+                                     backend/config.py (calibration, session,
+                                     wiring, box_done payload), no server needed
 ```
 
 ---
@@ -242,6 +247,10 @@ python tools/test_backend.py    # 14 DB integration tests (throwaway SQLite
 python tools/smoke.py           # end-to-end checks, backend must be running
 python tools/mqtt_probe.py      # MQTT-layer dedup/malformed-payload checks,
                                  # backend must be running
+python tools/test_firmware_contract.py   # sketch.ino vs config.py parity,
+                                          # no server needed
+python tools/l0_probe.py        # proves the LIVE device path (L0), not just
+                                 # L1 -- backend must be running
 ```
 
 `smoke.py` walks the exact demo path: two boxes arrive five simulated hours
@@ -261,7 +270,19 @@ atomic reset, rollback on a tampered order payload), each finishing with a
 consistency-checker assertion. `mqtt_probe.py` covers what neither can: a
 malformed or duplicate `box_done` published directly onto the MQTT topic.
 
-Run all four after every merge. Run them again at H23, before the feature
+`test_firmware_contract.py` catches the one failure mode none of the above
+can: `sketch.ino` and `backend/config.py` silently drifting apart (scale
+calibration, session/broker defaults, required GPIOs, `box_done` fields) —
+they can't share an import, so nothing else keeps them in sync. `l0_probe.py`
+is the only one that proves the **live device path** — every other test/probe
+here runs with no device attached, so an arrival always resolves through the
+L1 backend fallback; `l0_probe.py` launches `fake_device.py` as the ESP32
+stand-in and checks that a nominal arrival and each anomaly (`off_by_one`,
+`delta`, `mislabel`, `sensor_dead`) resolve in mode `L0` with the right
+verdict, except `sensor_dead`, where L1 is the intended outcome (a real
+board with a dead beam sensor never sees an edge either).
+
+Run all six after every merge. Run them again at H23, before the feature
 freeze.
 
 ---

@@ -8,7 +8,9 @@
  * detection, mass->count conversion and the coherence check. It is never told
  * the answer. Say that sentence to the jury; it is what the 15 points are for.
  *
- * Local overrides (the physical demo prop):
+ * Local overrides (the physical demo prop, standalone rig only -- disabled
+ * while a raw-MQTT-driven arrival is being counted, so a stray press never
+ * corrupts a live backend-driven box):
  *    BTN_BEAM  pressed  -> forces one beam event
  *    BTN_DONE  pressed  -> forces "box finished" immediately
  *    POT       turned   -> overrides the load cell with a manual mass
@@ -196,21 +198,28 @@ void loop() {
   mqtt.loop();
 
   // --- physical overrides: this is what makes the real rig worth touching ---
+  // Only live between arrivals (g_counting is set only once a raw-driven
+  // tare has locked in, and cleared by resetBox() at the end of every box).
+  // Without this guard, a stray press during a live MQTT-driven count would
+  // inject a phantom beam edge or force-publish an incomplete box -- on the
+  // standalone rig (no backend, no raw frames ever arrive) g_counting never
+  // becomes true, so these stay exactly as before.
   int bBeam = digitalRead(PIN_BEAM);
-  if (lastBeamBtn == HIGH && bBeam == LOW) {
+  if (!g_counting) digitalWrite(PIN_LED, bBeam == LOW ? HIGH : LOW);
+  if (!g_counting && lastBeamBtn == HIGH && bBeam == LOW) {
     g_count++;                            // force one extra core past the beam
     Serial.println("[manual] beam event");
   }
   lastBeamBtn = bBeam;
 
   int bDone = digitalRead(PIN_DONE);
-  if (lastDoneBtn == HIGH && bDone == LOW && g_count > 0) {
+  if (!g_counting && lastDoneBtn == HIGH && bDone == LOW && g_count > 0) {
     publishBoxDone();                     // force the box closed right now
   }
   lastDoneBtn = bDone;
 
   // potentiometer overrides the mass while BTN_BEAM is held
-  if (bBeam == LOW) {
+  if (!g_counting && bBeam == LOW) {
     int raw = analogRead(PIN_POT);        // 0..4095
     g_gross_g = (raw / 4095.0f) * 30000.0f;
   }

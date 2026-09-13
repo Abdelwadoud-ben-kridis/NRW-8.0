@@ -184,6 +184,12 @@ def reserve(con, now_sim: float, ref: str, qty: int) -> dict:
     succeeds if the box is still READY and unlocked.
     """
     with DB.transaction(con):
+        # settle any box that crossed its 24 h floor since loop_clock's last
+        # 0.2 s tick, so the CAS below (which expects state="READY") agrees
+        # with what fifo_allocate just decided is pickable -- without this,
+        # a demand called right after a clock jump could pick a box whose
+        # state column still said DRYING and 409 on the CAS.
+        sweep_cured(con, now_sim)
         order_id = DB.next_id(con, "orders", "order_id", "ORD")
         boxes = DB.rows(con, "SELECT * FROM boxes")
         plan = E.fifo_allocate(boxes, ref, int(qty), now_sim, order_id)
