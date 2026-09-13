@@ -3,9 +3,53 @@
 Owner: **P3 (dashboard / backend / site)**. Everyone codes against this file.
 If you change it, announce it out loud and bump the version line.
 
-    CONTRACT VERSION: 1.5
+    CONTRACT VERSION: 1.6
 
-Changes from 1.4 (barcode-first identification + overflow storage, 2026-09-13):
+Changes from 1.5 (make-to-order batches; capacity and overflow storage
+removed, 2026-09-13):
+
+- **`box_capacity` is gone entirely** — articles, `POST /api/articles`, and
+  `algo/engine.py::assess_box` no longer have or check it. Nobody knows how
+  many cores are in a box ahead of time; that is the entire reason the
+  scale exists. A crate of any size is accepted as long as its weight is a
+  clean multiple of its barcode's registered per-noyau mass.
+- **Overflow storage is gone entirely** — `slots.zone`, the 12-slot
+  STORAGE pool, and `POST /api/box/{id}/relocate` from contract 1.4 are all
+  removed. The curing rack (`config.SLOT_COUNT`, 306 slots) is the only
+  slot pool again.
+- **Production demand is FIFO-first, make-to-order for the shortfall.**
+  `POST /api/demand` still tries existing stock FIRST — FIFO, oldest whole
+  box, exactly as before (criteria 5/6 are graded on choosing among
+  EXISTING boxes, and that path is untouched). Only when the ENTIRE
+  pipeline for that reference (including boxes still curing or held by
+  another order, not just currently-free ones) genuinely can't cover the
+  request does the order become a **production batch** (`status
+  "IN_PRODUCTION"`) instead of `"IMPOSSIBLE"`. If there's already enough
+  in the pipeline, just not free yet, nothing changes — the familiar
+  `"sechage insuffisant"` / `"reserve"` refusal, unaffected.
+- **A batch's boxes are produced, not picked** — `POST /api/sim/arrival`
+  and `POST /api/sim/box` take a new optional `batch_order_id`; the
+  resulting box is tagged to that order (`boxes.batch_id`) via the same
+  scan/weigh path as any other arrival (no shortcut around identification
+  just because the box was expected).
+- **A batch ships as one unit, once every box tagged to it has left
+  DRYING.** `POST /api/demand/confirm` on an `IN_PRODUCTION` order ships
+  every `READY` box tagged to it (refusing with a 409 naming which boxes
+  are still curing, until none are); a box lost to quarantine along the
+  way still lets the rest ship, short and flagged (`"short": true`),
+  rather than blocking forever on a replacement nobody asked for.
+  `POST /api/demand/cancel` on a batch releases its boxes back to general
+  stock (`batch_id` cleared) instead of discarding them.
+- New order status: `IN_PRODUCTION`. New WebSocket snapshot field:
+  `batches_pending` (live progress per open batch, always recomputed from
+  `boxes.batch_id`, never cached).
+- New event kinds: `batch_opened`, `batch_shipped`, `batch_cancelled`.
+- `boxes.batch_id` column added (nullable, FK-in-spirit to
+  `orders.order_id`).
+
+Changes from 1.4 (barcode-first identification + overflow storage,
+2026-09-13 — storage and capacity described here were REMOVED again in 1.6,
+see above; identification stays as described):
 
 - **Identification moved off the board, onto a barcode scan.** The real
   physical process: a worker labels a physical box and registers its own
@@ -254,29 +298,32 @@ it never crashes the MQTT listener, and telemetry/curing keep running.
 | GET    | `/api/slots`          | –                                      | `[slot]`, the raw rack table |
 | GET    | `/api/anomalies`      | –                                      | `{key: label}` — options for the plant-model anomaly picker |
 | POST   | `/api/clock`          | `{"speed":60}` or `{"jump_h":6}`       | `{t_sim, speed}`, or `{"error":...}` (400: `speed` must be one of `config.ALLOWED_SPEEDS`, `jump_h` must be in `(0, config.MAX_JUMP_H]`) |
-| POST   | `/api/sim/arrival`    | `{"ref":"NY-114","qty":37,"anomaly":"none"}` | plays the plant model at 10 Hz, then L0/L1 as in §0 — this is the **A** hotkey |
-| POST   | `/api/demand`         | `{"ref":"NY-114","qty":40}`            | allocation plan (§4), or `{"error":...}` (400: missing/invalid `ref`/`qty`) |
-| POST   | `/api/demand/confirm` | `{"order_id":"ORD-3"}`                 | `{"ok":true,"already":false,"qty_allocated":N}` — confirming an already-DONE order returns `{"ok":true,"already":true}` instead of deducting again; confirming a CANCELLED/IMPOSSIBLE/unknown order is `{"error":...}` (409/404) |
-| POST   | `/api/demand/cancel`  | `{"order_id":"ORD-3"}`                 | `{"ok":true,"already":false,"released":[box_id,...]}` — cancelling an already-CANCELLED order returns `{"ok":true,"already":true}`; cancelling a DONE/IMPOSSIBLE/unknown order is `{"error":...}` (409/404) |
-| POST   | `/api/box/{id}/relocate` | –                                   | moves a READY, unlocked box from the curing rack into overflow storage (`{"box_id","from_slot","to_slot"}`), or `{"error":...}` (404 unknown box; 409 not READY, already in storage, or no free storage slot) |
+| POST   | `/api/barcodes`       | `{"barcode_id":"BC-1042","ref":"NY-114","unit_mass_g":206.0}` | a worker's registration, ahead of any arrival — new row, or `{"error":...}` (400 bad/unknown ref or mass; 409 duplicate barcode_id) |
+| GET    | `/api/barcodes?unused=true` | –                                 | `[{"barcode_id","ref","unit_mass_g","registered_sim","used_by_box"}]` |
+| POST   | `/api/sim/arrival`    | `{"barcode_id":"BC-1042","qty":37,"anomaly":"none"}` or `{"ref":"NY-114",...}` (auto-registers a throwaway barcode) — optional `"batch_order_id":"ORD-3"` tags the resulting box to that production batch | plays the plant model at 10 Hz, then L0/L1 as in §0 — this is the **A** hotkey |
+| POST   | `/api/demand`         | `{"ref":"NY-114","qty":40}`            | allocation plan (§4) — `status` is `"PENDING"` (FIFO fully covered it), `"IN_PRODUCTION"` (opened a batch for the shortfall), or `"IMPOSSIBLE"` (nothing allocated, ref unknown or a demand of 0/negative); or `{"error":...}` (400: missing/invalid `ref`/`qty`) |
+| POST   | `/api/demand/confirm` | `{"order_id":"ORD-3"}`                 | PENDING: `{"ok":true,"already":false,"qty_allocated":N}`. IN_PRODUCTION: ships every READY box tagged to the batch — `{"ok":true,"already":false,"qty_allocated":N,"target":M,"short":bool}`, or a 409 naming which boxes are still curing. Confirming an already-DONE order returns `{"ok":true,"already":true}`; confirming a CANCELLED/IMPOSSIBLE/unknown order is `{"error":...}` (409/404) |
+| POST   | `/api/demand/cancel`  | `{"order_id":"ORD-3"}`                 | PENDING: releases its picks back to READY. IN_PRODUCTION: clears `batch_id` on its boxes, returning them to general stock. Both: `{"ok":true,"already":false,"released":[box_id,...]}` — cancelling an already-CANCELLED order returns `{"ok":true,"already":true}`; cancelling a DONE/IMPOSSIBLE/unknown order is `{"error":...}` (409/404) |
 | POST   | `/api/sim/raw`        | `{"beam":0,"load_mv":1843}`            | `{ok:true}` — plant model → MQTT |
-| POST   | `/api/sim/box`        | `{"ref":"NY-114","qty":37}`            | L1 FALLBACK: create a box without the ESP32 |
+| POST   | `/api/sim/box`        | `{"barcode_id":"BC-1042","qty":37}` or `{"ref":"NY-114",...}`, optional `"batch_order_id"` | L1 FALLBACK: create a box without the ESP32 |
 | POST   | `/api/sim/env`        | `{"t_c":31.0,"rh":78.0}`               | force curing-room climate — display/evidence only, contract 1.2 (§6.2) |
-| POST   | `/api/reset`          | `{"seed":true}` (default) or `{"seed":false}` | wipe + reseed everything, or (with `seed:false`) wipe boxes/orders/events/slots but keep the current `articles` |
+| POST   | `/api/reset`          | `{"seed":true}` (default) or `{"seed":false}` | wipe + reseed everything, or (with `seed:false`) wipe boxes/orders/events/slots/barcodes but keep the current `articles` |
 | POST   | `/api/scenario`       | `{"name":"demo"}`                      | loads the rehearsed 6-box / 34 h demo history (full reseed) — the **S** hotkey |
 | GET    | `/api/events?limit=200` | –                                    | event log |
 | GET    | `/api/db/check`       | –                                      | read-only consistency report (§7 below) |
 | GET    | `/api/db/box/{id}`    | –                                      | one box's row + slot + every event/order that names it |
 
 `POST /api/articles` — `ref`, `label`, `unit_mass_g` are required; `tolerance_g`
-(default ~3 % of `unit_mass_g`), `box_capacity` (default 40) and `color`
-(default: next unused colour from a fixed palette) are optional. A `cure_floor_h`
-in the body is accepted but **ignored** — contract 1.2 fixes drying at 24 h for
-every reference, so there is no per-reference exception to request. A duplicate
-`ref` or a non-positive `unit_mass_g` is a 400. This is how
-`dashboard/index.html`'s "+ New reference" form (in the ⋯ menu) adds a type
-without a restart — it is additive only, so `backend/db.py::ARTICLES` still
-owns the four references the rehearsed demo depends on.
+(default ~3 % of `unit_mass_g`) and `color` (default: next unused colour from
+a fixed palette) are optional. There is no `box_capacity` (contract 1.6 —
+nobody knows how many cores are in a box ahead of time; that's what the
+scale is for). A `cure_floor_h` in the body is accepted but **ignored** —
+contract 1.2 fixes drying at 24 h for every reference, so there is no
+per-reference exception to request. A duplicate `ref` or a non-positive
+`unit_mass_g` is a 400. This is how `dashboard/index.html`'s "+ New
+reference" form (in the ⋯ menu) adds a type without a restart — it is
+additive only, so `backend/db.py::ARTICLES` still owns the four references
+the rehearsed demo depends on.
 
 Static: `GET /` serves `dashboard/index.html`. Everything under `/static/*` is
 the `dashboard/` folder.
@@ -298,12 +345,15 @@ Server → client, one JSON object per frame, ~5 Hz:
   "device": {"online":true,"state":"COUNTING","count_beam":37,
              "gross_g":9420.5,"last_seen_sim":93598.0},
   "kpi": {"slots_total":306,"slots_used":37,"boxes_ready":12,
-          "boxes_drying":9,"boxes_quarantine":1,"cores_available":431,
-          "storage_total":12,"storage_used":2,"storage_free":10},
+          "boxes_drying":9,"boxes_quarantine":1,"cores_available":431},
   "boxes": [ /* see below */ ],
   "orders_pending": [ {"order_id":"ORD-3","ref":"NY-114","qty_requested":40,
                        "qty_allocated":40,"lock_expires_sim":97200.0,
                        "lock_remaining_s":1800.0} ],
+  "batches_pending": [ {"order_id":"ORD-5","ref":"NY-114","target":30,
+                        "boxes":[{"box_id":"BOX-9","state":"DRYING","qty":30}],
+                        "produced":0,"still_drying":["BOX-9"],
+                        "lost_to_quarantine":[],"ready_to_ship":false} ],
   "slots_occupancy": {"F0-C3-L7":"BOX-12", ...},
   "last_order": { /* §4 */ },
   "crane": {"cmd":"store","box_id":"BOX-12","slot_id":"F0-C3-L7"}
@@ -314,27 +364,37 @@ Server → client, one JSON object per frame, ~5 Hz:
 its lock countdown — added in contract 1.2 so the HMI can show a
 reservation about to expire before it happens (§6.5).
 
+`batches_pending` (contract 1.6) lists every `IN_PRODUCTION` order — a
+demand FIFO couldn't fully cover, now being made to order (§4, §6.7). Every
+field is recomputed live from `boxes.batch_id` on each snapshot, never
+cached in the order's own payload, so it can never drift from what has
+actually cured. `ready_to_ship` is true once no tagged box is still
+`DRYING` (a `QUARANTINE` box does not block shipping, it just doesn't
+count toward `produced`).
+
 Box object (this exact shape is what the 3D twin and the table both read):
 
 ```json
 { "box_id":"BOX-12", "ref":"NY-114", "label":"Noyau culasse 114",
-  "code":"NY114-00012-A1B2", "zone":"CURING",
+  "code":"BC-1042", "batch_id":null,
   "qty_initial":37, "qty_available":37, "slot_id":"F0-C3-L7",
   "state":"DRYING", "t_in_sim":7200.0, "required_cure_h":26.4,
   "ready_at_sim":102240.0, "cure_pct":38.5,
-  "count_beam":37, "count_weight":37, "gross_g":9420.5,
+  "count_beam":0, "count_weight":37, "gross_g":9420.5,
   "confidence":"HAUTE", "reason":null,
   "locked_by":null, "lock_expires_sim":null }
 ```
 
-`code` is a traceability label generated once at creation (contract 1.4,
-`backend/warehouse.py::_gen_code`) — analogous to a worker sticking a
-barcode/QR on the physical crate before it reaches the scale. It is never
-read back to make a decision; the mass cross-check in `assess_box` is still
-the only thing that can catch a mislabelled box. `zone` is `"CURING"` (the
-306-slot rack) or `"STORAGE"` (the flat overflow pool a cured box moves to
-via `POST /api/box/{id}/relocate` when it isn't picked up right away) —
-`null` only for a slotless `QUARANTINE`/`EMPTY` box.
+`code` is the `barcode_id` the conveyor's scanner read off this physical
+crate (contract 1.5) — a worker registered it, with its own per-noyau
+weight, before the box ever arrived (`POST /api/barcodes`). It is never
+read back to make a decision; the residual weight check in `assess_box` is
+still the only thing that can catch a mismatched box. `batch_id` (contract
+1.6) is the order this box was produced for, when existing stock couldn't
+cover a demand and a production batch opened for it — `null` for ordinary
+stock. `count_beam` still exists in the schema/API for compatibility but is
+always `0` and carries no meaning any more (contract 1.5 — the scale is the
+only sensor).
 
 `ref` is `null` (and `label` falls back to the quarantine `reason`) for a
 box quarantined against an unrecognised reference (contract 1.2, §1.3) —
@@ -372,13 +432,24 @@ Client → server (rare; most client actions go through REST):
 }
 ```
 
-Each `take` is always the picked box's **entire** `qty_available` (§6.7) —
-`fifo_allocate` never splits a box, so `qty_allocated` can land above
+Each `take` is always the picked box's **entire** `qty_available` (§6 rule
+7) — `fifo_allocate` never splits a box, so `qty_allocated` can land above
 `qty_requested` when the last whole box needed to cover the order is bigger
-than what was still missing. If the ref's total whole-box stock can't reach
-`qty_requested` at all, `picks` is `[]`, `status` is `"IMPOSSIBLE"`, and every
-otherwise-pickable box appears in `rejected[]` with reason
-`"stock insuffisant"` (detail: `"N disponible(s) au total pour M demande(s)"`).
+than what was still missing.
+
+If `fifo_allocate` finds nothing pickable (`picks: []`), `backend/warehouse.py
+::reserve` looks at the WHOLE pipeline for that ref next (§6 rule 8):
+
+- **Enough exists somewhere, just not free yet** (curing or held by
+  another order) — unchanged: `status` is `"IMPOSSIBLE"`, and every
+  otherwise-pickable box appears in `rejected[]` with reason
+  `"stock insuffisant"` (detail: `"N disponible(s) au total pour M
+  demande(s)"`).
+- **Genuinely not enough anywhere** — the order opens a production batch
+  instead: `status` is `"IN_PRODUCTION"`, a `"target"` field is added
+  (the full `qty_requested`), and `rejected[]` still lists why nothing
+  existing was pickable. See `batches_pending` (§3) for how the batch's
+  live progress is reported afterward.
 
 `reason`/`detail` are given here exactly as `algo/engine.py` emits them:
 unaccented ASCII, since that is also what `algo/test_engine.py` asserts on.
@@ -394,33 +465,44 @@ enforced instead of taking your word for it. Render it on screen, always.
 
 ```sql
 articles(ref PK, label, unit_mass_g REAL, tolerance_g REAL,
-         box_capacity INT, cure_floor_h REAL DEFAULT 24.0, color TEXT)
+         cure_floor_h REAL DEFAULT 24.0, color TEXT)
+  -- no box_capacity (contract 1.6) -- nobody knows how many cores are in a
+  -- box ahead of time, that's what the scale is for.
 
 boxes(box_id PK, article_ref FK NULL, qty_initial INT, qty_available INT,
       slot_id FK NULL, state TEXT, t_in_sim REAL, required_cure_h REAL,
       ready_at_sim REAL, count_beam INT, count_weight INT, gross_g REAL,
       confidence TEXT, reason TEXT, locked_by TEXT NULL,
-      lock_expires_sim REAL NULL, code TEXT NULL)
-  -- article_ref is NULL only while state='QUARANTINE' (unknown reference,
-  -- contract 1.2). A partial unique index on slot_id (WHERE NOT NULL)
-  -- makes "one box per slot" DB-enforced, not just convention. `code` is
-  -- the generated barcode/QR traceability label (contract 1.4) -- cosmetic,
-  -- never read back to make a decision.
+      lock_expires_sim REAL NULL, code TEXT NULL, batch_id TEXT NULL)
+  -- article_ref is NULL only while state='QUARANTINE' (unknown/reused
+  -- barcode, contract 1.5). A partial unique index on slot_id (WHERE NOT
+  -- NULL) makes "one box per slot" DB-enforced, not just convention.
+  -- `code` is the barcode_id the conveyor's scanner read off this crate
+  -- (contract 1.5) -- never read back to make a decision. `batch_id`
+  -- (contract 1.6) is the IN_PRODUCTION order this box was produced for,
+  -- when existing stock couldn't cover a demand; NULL for ordinary stock.
+  -- `count_beam` is always 0, kept only for API/schema compatibility.
 
 slots(slot_id PK, face INT, col INT, level INT,
-      occupied_by FK NULL, reserved_for FK NULL,
-      zone TEXT DEFAULT 'CURING')
+      occupied_by FK NULL, reserved_for FK NULL)
   -- occupied_by/reserved_for are soft references (see database-guide.md),
   -- but a partial unique index on occupied_by (WHERE NOT NULL) makes "one
   -- slot per box" DB-enforced. Both are maintained by backend/warehouse.py
-  -- in the same transaction as the box they describe. `zone` (contract 1.4)
-  -- is 'CURING' (the 306-slot rack, config.SLOT_COUNT) or 'STORAGE' (the
-  -- flat config.STORAGE_SLOTS-sized overflow pool a cured box moves to via
-  -- POST /api/box/{id}/relocate) -- a box's zone is that of its current slot.
+  -- in the same transaction as the box they describe. No zone (contract
+  -- 1.6 removed overflow storage) -- every slot is the curing rack.
+
+barcodes(barcode_id PK, ref FK NOT NULL, unit_mass_g REAL, registered_sim REAL,
+         used_by_box TEXT NULL)
+  -- a worker's registration of ONE physical box (contract 1.5), well
+  -- before it ever arrives -- not a shared type like articles. `used_by_box`
+  -- is set the instant the conveyor's scanner reads this barcode back
+  -- (backend/warehouse.py::create_box); a barcode is consumed exactly once.
 
 orders(order_id PK, ref, qty_requested INT, qty_allocated INT,
        status TEXT, created_sim REAL, payload TEXT)
   -- payload.status is kept equal to the status column on every write.
+  -- status is PENDING | IN_PRODUCTION | DONE | CANCELLED | IMPOSSIBLE
+  -- (IN_PRODUCTION added in contract 1.6 -- see backend/warehouse.py::reserve).
 
 events(id PK AUTOINCREMENT, t_sim REAL, kind TEXT, payload TEXT)
   -- inserted in the SAME transaction as the mutation it describes
@@ -444,11 +526,20 @@ two, so `PICKING` is never observed mid-flight. See `algo/engine.py`'s
 `PERSISTED_STATES`/`_TRANSITIONS` and `docs/database-guide.md`.
 
 `orders.status`: `PENDING → DONE | CANCELLED`, or born straight into
-`IMPOSSIBLE` (zero picks). Confirming/cancelling an order already in its
-target state is a no-op (`{"already": true}`); confirming/cancelling from
-any other state is a 409. An expired reservation also lands on
-`CANCELLED` (event kind `order_expired`, distinct from a manual
-`order_cancel`).
+`IMPOSSIBLE` (zero picks, e.g. an unknown ref). Confirming/cancelling an
+order already in its target state is a no-op (`{"already": true}`);
+confirming/cancelling from any other state is a 409. An expired reservation
+also lands on `CANCELLED` (event kind `order_expired`, distinct from a
+manual `order_cancel`).
+
+`IN_PRODUCTION` (contract 1.6) is the other birth outcome: existing FIFO
+stock across the WHOLE pipeline for that reference (curing or reserved
+included, not just currently-free) can't cover the request, so a
+production batch opens instead of `IMPOSSIBLE`. `IN_PRODUCTION → DONE` is
+`POST /api/demand/confirm` shipping every `READY` box tagged to the batch
+(`boxes.batch_id`) once none is left `DRYING` — see §6 rule 8 below.
+`IN_PRODUCTION → CANCELLED` clears `batch_id` on its boxes, returning them
+to general stock instead of discarding them.
 
 ---
 
@@ -481,21 +572,26 @@ any other state is a 409. An expired reservation also lands on
    an order in the wrong state is refused (409), never silently applied to
    whatever the boxes happen to be now.
 7. **A pick never splits a box** (contract 1.3): `take` is always a box's
-   whole `qty_available`. If the ref's total whole-box stock can't reach
-   `qty_requested`, the reservation is refused outright (`IMPOSSIBLE`,
-   `picks: []`) rather than reserving less than what was asked for.
-7. Every backend operation that touches more than one row runs inside one
+   whole `qty_available`.
+8. **Demand is FIFO-first, make-to-order for the shortfall** (contract
+   1.6): if the ref's total pipeline (every non-`QUARANTINE` box, curing or
+   reserved included, not just currently-free) can't reach `qty_requested`,
+   the order opens a production batch (`IN_PRODUCTION`) instead of being
+   refused. If enough already exists somewhere in the pipeline — just not
+   free yet — nothing changes: the order stays `IMPOSSIBLE`, `picks: []`,
+   with the ordinary drying/reserved refusal reasons.
+9. Every backend operation that touches more than one row runs inside one
    database transaction (`backend/db.py::transaction`, used throughout
    `backend/warehouse.py`) — a crash or a refused precondition leaves
    nothing half-written.
-8. All UI strings come from `dashboard/labels.js`. Nobody hard-codes a string
-   in the HTML. Language switch = one line.
+10. All UI strings come from `dashboard/labels.js`. Nobody hard-codes a
+    string in the HTML. Language switch = one line.
 
 ---
 
 ## 7. Consistency checker
 
-`GET /api/db/check` (`backend/consistency.py`) runs 22 read-only checks —
+`GET /api/db/check` (`backend/consistency.py`) runs 25 read-only checks —
 foreign-key-style integrity, box/order state shape, lock consistency, cure
 timing, article sanity — and returns `{"overall": "PASS"|"WARN"|"FAIL",
 "t_sim", "checks": [{"id","severity","count","offending","message"}]}`.

@@ -165,14 +165,12 @@ def box_view(b: dict, now: float) -> dict:
     # is genuinely no article row to join here.
     art = (DB.one(con, "SELECT * FROM articles WHERE ref=?", (b["article_ref"],))
           if b["article_ref"] else None) or {}
-    slot = (DB.one(con, "SELECT zone FROM slots WHERE slot_id=?", (b["slot_id"],))
-           if b["slot_id"] else None)
     return {
         "box_id": b["box_id"], "ref": b["article_ref"],
         "label": art.get("label") or (b["reason"] if not b["article_ref"] else b["article_ref"]),
         "color": art.get("color", "#888"),
         "code": b["code"],
-        "zone": slot["zone"] if slot else None,
+        "batch_id": b["batch_id"],
         "qty_initial": b["qty_initial"], "qty_available": b["qty_available"],
         "slot_id": b["slot_id"], "state": b["state"],
         "t_in_sim": b["t_in_sim"], "required_cure_h": round(b["required_cure_h"], 1),
@@ -198,14 +196,7 @@ def snapshot() -> dict:
     boxes = DB.rows(con, "SELECT * FROM boxes ORDER BY t_in_sim")
     boxes.sort(key=E.fifo_key)
     views = [box_view(b, now) for b in boxes]
-    # slots_used must count only the CURING rack (kpi.slots_total is
-    # C.SLOT_COUNT, the 306-slot rack) -- counting every box.slot_id would
-    # double-count a box after it moves to STORAGE, since it still has a
-    # slot_id, just not one in the rack.
-    used = DB.one(con, "SELECT COUNT(*) c FROM slots "
-                       "WHERE zone='CURING' AND occupied_by IS NOT NULL")["c"]
-    storage_used = DB.one(con, "SELECT COUNT(*) c FROM slots "
-                               "WHERE zone='STORAGE' AND occupied_by IS NOT NULL")["c"]
+    used = sum(1 for b in boxes if b["slot_id"])
     counts: dict[str, int] = {}
     for b in boxes:
         counts[b["state"]] = counts.get(b["state"], 0) + 1
@@ -254,6 +245,21 @@ def snapshot() -> dict:
             "lock_remaining_s": round(lock_exp - now, 1) if lock_exp is not None else None,
         })
 
+    # Every open production batch -- existing FIFO stock couldn't cover the
+    # order, so it's being made to order instead (backend/warehouse.py::
+    # reserve). Live-recomputed from boxes.batch_id, never cached, so the
+    # dashboard's progress bar can never drift from what actually cured.
+    batches_pending = []
+    for o in DB.rows(con, "SELECT * FROM orders WHERE status='IN_PRODUCTION' "
+                          "ORDER BY created_sim"):
+        plan_o = json.loads(o["payload"])
+        bstat = W.batch_status(con, o["order_id"])
+        batches_pending.append({
+            "order_id": o["order_id"], "ref": o["ref"],
+            "target": plan_o.get("target", o["qty_requested"]),
+            **bstat,
+        })
+
     return {
         "type": "state",
         "contract_version": C.CONTRACT_VERSION,
@@ -268,13 +274,11 @@ def snapshot() -> dict:
         "crane": STATE["crane"],
         "last_order": STATE["last_order"],
         "orders_pending": orders_pending,
+        "batches_pending": batches_pending,
         "kpi": {
             "slots_total": C.SLOT_COUNT,
             "slots_used": used,
             "slots_free": C.SLOT_COUNT - used,
-            "storage_total": C.STORAGE_SLOTS,
-            "storage_used": storage_used,
-            "storage_free": C.STORAGE_SLOTS - storage_used,
             "boxes_ready": counts.get("READY", 0),
             "boxes_drying": counts.get("DRYING", 0),
             "boxes_reserved": counts.get("RESERVED", 0),
@@ -324,9 +328,9 @@ def event(kind: str, payload: dict) -> None:
 
 def store_box(barcode_id: str, gross_g: float, source: str,
              t_c: float | None = None, rh: float | None = None,
-             fw: str | None = None) -> dict:
+             fw: str | None = None, batch_id: str | None = None) -> dict:
     res = W.create_box(con, clock.t_sim, barcode_id, gross_g, source,
-                       t_c, rh, fw)
+                       t_c, rh, fw, batch_id=batch_id)
     STATE["crane"] = {"cmd": "store", "box_id": res["box_id"],
                       "slot_id": res["slot"]["slot_id"] if res.get("slot") else None,
                       "seq": STATE["crane"]["seq"] + 1}
@@ -444,7 +448,9 @@ async def handle_box_done(payload: dict) -> None:
     if _arrival_window is None:
         _last_unsolicited = (fp, now_mono)
 
-    res = store_box(barcode_id, gross_g, source="esp32", t_c=t_c, rh=rh, fw=fw)
+    batch_id = _arrival_window.get("batch_id") if _arrival_window else None
+    res = store_box(barcode_id, gross_g, source="esp32", t_c=t_c, rh=rh, fw=fw,
+                    batch_id=batch_id)
 
     if verdict["action"] == "resolve_window" and _arrival_window is not None:
         _arrival_window["status"] = "RESOLVED_L0"
@@ -500,7 +506,8 @@ def _auto_register_barcode(ref: str, qty: int) -> str | None:
     return barcode_id
 
 
-async def run_arrival(barcode_id: str, qty: int, anomaly: str = "none") -> dict:
+async def run_arrival(barcode_id: str, qty: int, anomaly: str = "none",
+                      batch_id: str | None = None) -> dict:
     """Play one box arrival through the plant model, at 10 Hz.
 
     L0: the ESP32 is listening, weighs, and answers on scw/<S>/dev/box_done.
@@ -511,6 +518,11 @@ async def run_arrival(barcode_id: str, qty: int, anomaly: str = "none") -> dict:
     `barcode_id` must already be registered (POST /api/barcodes) and unused
     -- that lookup already happened one level up in api_arrival, which is
     also where the convenience "just give me a ref" path auto-registers one.
+
+    `batch_id` tags the resulting box to an IN_PRODUCTION order (see
+    backend/warehouse.py::reserve) -- carried on the arrival window so both
+    the L0 (handle_box_done) and L1 paths below tag the same box the same
+    way, whichever one actually creates it.
 
     Opens an arrival window (see algo.engine.dedup_verdict) so a device
     answer that lands AFTER the L1 grace period is recognised as the same
@@ -529,7 +541,8 @@ async def run_arrival(barcode_id: str, qty: int, anomaly: str = "none") -> dict:
         frames = PLANT.build_arrival(bc["unit_mass_g"], qty, anomaly)
         my_epoch = _epoch
         _arrival_window = {"barcode_id": barcode_id, "status": "OPEN",
-                           "resolved_at": None, "box_id": None}
+                           "resolved_at": None, "box_id": None,
+                           "batch_id": batch_id}
 
         # Still the wire field name "ref" (firmware-compatibility: the board
         # only ever echoes this string back, never parses it) -- its content
@@ -558,7 +571,8 @@ async def run_arrival(barcode_id: str, qty: int, anomaly: str = "none") -> dict:
         STATE["mode"] = "L1"
         gross = PLANT.final_gross_g(frames)
         res = store_box(barcode_id, gross, source="L1",
-                        t_c=STATE["env"]["t_c"], rh=STATE["env"]["rh"])
+                        t_c=STATE["env"]["t_c"], rh=STATE["env"]["rh"],
+                        batch_id=batch_id)
         _arrival_window["status"] = "RESOLVED_L1"
         _arrival_window["resolved_at"] = time.monotonic()
         _arrival_window["box_id"] = res["box_id"]
@@ -599,7 +613,6 @@ async def api_articles_add(body: dict):
             unit_mass_g=float(body.get("unit_mass_g", 0) or 0),
             tolerance_g=(float(body["tolerance_g"])
                         if body.get("tolerance_g") not in (None, "") else None),
-            box_capacity=int(body.get("box_capacity", 40) or 40),
             color=body.get("color") or None)
     except (ValueError, TypeError) as e:
         return JSONResponse({"error": str(e)}, 400)
@@ -670,16 +683,30 @@ async def api_arrival(body: dict):
     auto-mints and registers a throwaway barcode for that reference on the
     spot, so a quick demo/test press of A doesn't need a separate
     registration step first.
+
+    `batch_order_id`, when given, tags the resulting box to that
+    IN_PRODUCTION order (backend/warehouse.py::reserve) -- production
+    against the make-to-order shortfall, not a fresh addition to general
+    stock.
     """
     barcode_id = body.get("barcode_id")
     qty = int(body.get("qty", 37))
     anomaly = body.get("anomaly", "none")
+    batch_id = body.get("batch_order_id")
+    if batch_id:
+        order = DB.one(con, "SELECT status FROM orders WHERE order_id=?", (batch_id,))
+        if not order:
+            return JSONResponse({"error": "unknown order: %s" % batch_id}, 404)
+        if order["status"] != "IN_PRODUCTION":
+            return JSONResponse(
+                {"error": "order %s is not in production (status %s)"
+                          % (batch_id, order["status"])}, 409)
     if not barcode_id:
         ref = body.get("ref") or DB.ARTICLES[0][0]
         barcode_id = _auto_register_barcode(ref, qty)
         if barcode_id is None:
             return JSONResponse({"error": "unknown ref: %s" % ref}, 400)
-    res = await run_arrival(barcode_id, qty, anomaly)
+    res = await run_arrival(barcode_id, qty, anomaly, batch_id=batch_id)
     await broadcast()
     return res
 
@@ -688,10 +715,20 @@ async def api_arrival(body: dict):
 async def api_sim_box(body: dict):
     """L1 shortcut: create a box with no plant model and no ESP32 at all.
 
-    Same `barcode_id`-or-`ref` convenience as /api/sim/arrival.
+    Same `barcode_id`-or-`ref` convenience, and the same `batch_order_id`
+    tagging, as /api/sim/arrival.
     """
     barcode_id = body.get("barcode_id")
     qty = int(body.get("qty", 37))
+    batch_id = body.get("batch_order_id")
+    if batch_id:
+        order = DB.one(con, "SELECT status FROM orders WHERE order_id=?", (batch_id,))
+        if not order:
+            return JSONResponse({"error": "unknown order: %s" % batch_id}, 404)
+        if order["status"] != "IN_PRODUCTION":
+            return JSONResponse(
+                {"error": "order %s is not in production (status %s)"
+                          % (batch_id, order["status"])}, 409)
     if not barcode_id:
         ref = body.get("ref") or DB.ARTICLES[0][0]
         barcode_id = _auto_register_barcode(ref, qty)
@@ -700,7 +737,8 @@ async def api_sim_box(body: dict):
     bc = DB.one(con, "SELECT * FROM barcodes WHERE barcode_id=?", (barcode_id,))
     gross = C.TARE_G + qty * (bc["unit_mass_g"] if bc else 200.0)
     res = store_box(barcode_id, gross, source="manual",
-                    t_c=STATE["env"]["t_c"], rh=STATE["env"]["rh"])
+                    t_c=STATE["env"]["t_c"], rh=STATE["env"]["rh"],
+                    batch_id=batch_id)
     await broadcast()
     return {k: v for k, v in res.items() if k != "slot"}
 
@@ -792,24 +830,6 @@ async def api_cancel(body: dict):
         return JSONResponse({"error": e.message}, e.code)
     if STATE["last_order"] and STATE["last_order"].get("order_id") == oid:
         STATE["last_order"] = None
-    await broadcast()
-    return res
-
-
-@app.post("/api/box/{box_id}/relocate")
-async def api_relocate(box_id: str):
-    """CDC's second cured-box outcome: not picked up yet, so it moves out of
-    the curing rack into overflow storage, freeing its curing slot."""
-    try:
-        res = W.relocate(con, clock.t_sim, box_id)
-    except W.OpError as e:
-        return JSONResponse({"error": e.message}, e.code)
-    STATE["crane"] = {"cmd": "relocate", "box_id": box_id,
-                      "slot_id": res["to_slot"], "seq": STATE["crane"]["seq"] + 1}
-    STATE["banner"] = {"kind": "ok",
-                       "text": "%s transfere vers le stockage %s"
-                               % (box_id, res["to_slot"]),
-                       "t_sim": clock.t_sim}
     await broadcast()
     return res
 

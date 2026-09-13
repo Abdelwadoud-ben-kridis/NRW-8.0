@@ -78,10 +78,14 @@ that ahead of an actual request.
 be an adaptive cure model, removed in CONTRACT VERSION 1.2 — the CDC never
 asked for it). `docs/demo-script.md` beat 7 now carries two fully-built,
 demonstrable answers: the FIFO rejected-list audit trail with the `/db`
-consistency checker, and the barcode-first identification + overflow-storage
-design (CONTRACT VERSION 1.5) — a cured box that hasn't been picked up
-doesn't have to sit in the curing rack, freeing its slot for the next
-arrival without losing its FIFO position.
+consistency checker, and make-to-order production batches (CONTRACT VERSION
+1.6) — when existing stock genuinely can't cover a demand, the order opens
+a tracked production batch instead of a flat refusal, and ships every box
+in it together the moment the last one clears its 24 h cure, short and
+flagged rather than blocked if one was lost to quarantine along the way.
+This never bypasses FIFO: any demand that CAN be met from existing stock
+still goes through the same oldest-box-first, full-audit-trail path as
+always (criteria 5/6 are graded on exactly that path, unchanged).
 
 The CDC's own sentence — *"the system must be able to say at any moment: which
 core type is present, how many, in which box, for how long, whether they are

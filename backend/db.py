@@ -19,7 +19,6 @@ CREATE TABLE IF NOT EXISTS articles (
   label         TEXT NOT NULL,
   unit_mass_g   REAL NOT NULL,
   tolerance_g   REAL NOT NULL DEFAULT 6.0,
-  box_capacity  INTEGER NOT NULL DEFAULT 40,
   cure_floor_h  REAL NOT NULL DEFAULT 24.0,
   color         TEXT DEFAULT '#4f8cff'
 );
@@ -30,11 +29,7 @@ CREATE TABLE IF NOT EXISTS slots (
   col         INTEGER NOT NULL,
   level       INTEGER NOT NULL,
   occupied_by TEXT,
-  reserved_for TEXT,
-  -- 'CURING' (the 306-slot rack) or 'STORAGE' (the flat overflow pool a
-  -- cured box moves to when it is not picked up right away -- see
-  -- backend/warehouse.py::relocate). Added by _migrate() on an existing DB.
-  zone        TEXT NOT NULL DEFAULT 'CURING'
+  reserved_for TEXT
 );
 
 CREATE TABLE IF NOT EXISTS boxes (
@@ -64,7 +59,12 @@ CREATE TABLE IF NOT EXISTS boxes (
   -- in spirit; kept soft/nullable like slot_id, since an unknown scan still
   -- gets a QUARANTINE row for the audit trail even though no barcodes row
   -- exists to reference). Added by _migrate().
-  code            TEXT
+  code            TEXT,
+  -- Set when this box was produced FOR a specific order that couldn't be
+  -- fully covered by existing FIFO stock (backend/warehouse.py::reserve /
+  -- produce_for_batch) -- NULL for ordinary stock. A batch order ships only
+  -- once every box tagged to it has left DRYING (READY or QUARANTINE).
+  batch_id        TEXT REFERENCES orders(order_id)
 );
 
 -- A slot holds at most one box, and a box occupies at most one slot -- these
@@ -116,11 +116,11 @@ CREATE INDEX IF NOT EXISTS idx_boxes_tin ON boxes(t_in_sim);
 """
 
 ARTICLES = [
-    # ref,     label,                       unit g, tol, cap, color
-    ("NY-114", "Noyau culasse 114",          206.0, 6.0, 40, "#4f8cff"),
-    ("NY-220", "Noyau corps de vanne 220",   412.0, 9.0, 24, "#22c98a"),
-    ("NY-075", "Noyau raccord 75",            88.5, 4.0, 60, "#f5a623"),
-    ("NY-330", "Noyau collecteur 330",       735.0, 12.0, 12, "#c86bfa"),
+    # ref,     label,                       unit g, tol,  color
+    ("NY-114", "Noyau culasse 114",          206.0, 6.0,  "#4f8cff"),
+    ("NY-220", "Noyau corps de vanne 220",   412.0, 9.0,  "#22c98a"),
+    ("NY-075", "Noyau raccord 75",            88.5, 4.0,  "#f5a623"),
+    ("NY-330", "Noyau collecteur 330",       735.0, 12.0, "#c86bfa"),
 ]
 
 # colors offered to a reference created from the UI, cycled so a jury demo
@@ -141,23 +141,15 @@ def _migrate(con: sqlite3.Connection) -> None:
 
     SCHEMA's CREATE TABLE IF NOT EXISTS never adds a column to a table that
     already exists, so a live database created before `boxes.code` /
-    `slots.zone` existed needs an explicit ALTER. Guarded on PRAGMA
+    `boxes.batch_id` existed needs an explicit ALTER. Guarded on PRAGMA
     table_info so this is a no-op on a fresh DB (already has the column from
     SCHEMA) and safe to call every startup.
     """
     box_cols = {r["name"] for r in con.execute("PRAGMA table_info(boxes)").fetchall()}
     if "code" not in box_cols:
         con.execute("ALTER TABLE boxes ADD COLUMN code TEXT")
-    slot_cols = {r["name"] for r in con.execute("PRAGMA table_info(slots)").fetchall()}
-    if "zone" not in slot_cols:
-        con.execute("ALTER TABLE slots ADD COLUMN zone TEXT NOT NULL DEFAULT 'CURING'")
-    n_storage = con.execute(
-        "SELECT COUNT(*) FROM slots WHERE zone='STORAGE'").fetchone()[0]
-    if n_storage < C.STORAGE_SLOTS:
-        con.executemany(
-            "INSERT OR IGNORE INTO slots(slot_id,face,col,level,zone) "
-            "VALUES (?,-1,?,0,'STORAGE')",
-            [(storage_slot_id(i), i) for i in range(n_storage + 1, C.STORAGE_SLOTS + 1)])
+    if "batch_id" not in box_cols:
+        con.execute("ALTER TABLE boxes ADD COLUMN batch_id TEXT")
     con.commit()
 
 
@@ -206,10 +198,6 @@ def slot_id(face: int, col: int, level: int) -> str:
     return "F%d-C%d-L%d" % (face, col, level)
 
 
-def storage_slot_id(n: int) -> str:
-    return "STORAGE-%d" % n
-
-
 def seed(con: sqlite3.Connection, keep_articles: bool = False) -> None:
     """Wipe the dynamic tables and lay out a fresh rack (C.SLOT_COUNT slots).
 
@@ -233,8 +221,8 @@ def seed(con: sqlite3.Connection, keep_articles: bool = False) -> None:
         if not keep_articles:
             con.execute("DELETE FROM articles")
             con.executemany(
-                "INSERT INTO articles(ref,label,unit_mass_g,tolerance_g,box_capacity,color)"
-                " VALUES (?,?,?,?,?,?)", ARTICLES)
+                "INSERT INTO articles(ref,label,unit_mass_g,tolerance_g,color)"
+                " VALUES (?,?,?,?,?)", ARTICLES)
         con.execute("DELETE FROM meta")
         rows = []
         for f in range(C.FACES):
@@ -243,9 +231,6 @@ def seed(con: sqlite3.Connection, keep_articles: bool = False) -> None:
                     rows.append((slot_id(f, c, l), f, c, l))
         con.executemany(
             "INSERT INTO slots(slot_id,face,col,level) VALUES (?,?,?,?)", rows)
-        con.executemany(
-            "INSERT INTO slots(slot_id,face,col,level,zone) VALUES (?,-1,?,0,'STORAGE')",
-            [(storage_slot_id(i), i) for i in range(1, C.STORAGE_SLOTS + 1)])
         meta_set(con, "t_sim", C.CLOCK_START_SIM)
         meta_set(con, "speed", C.DEFAULT_SPEED)
 
@@ -339,7 +324,7 @@ def meta_set(con, key: str, value) -> None:
 
 def add_article(con, ref: str, label: str, unit_mass_g: float,
                 tolerance_g: float | None = None,
-                box_capacity: int = 40, cure_floor_h: float | None = None,
+                cure_floor_h: float | None = None,
                 color: str | None = None) -> dict:
     """Register a new reference/type. Raises ValueError on a bad or
     duplicate ref -- the caller (the REST handler) turns that into a 400.
@@ -366,9 +351,9 @@ def add_article(con, ref: str, label: str, unit_mass_g: float,
             color = NEW_REF_PALETTE[n % len(NEW_REF_PALETTE)]
         con.execute(
             "INSERT INTO articles(ref,label,unit_mass_g,tolerance_g,"
-            "box_capacity,cure_floor_h,color) VALUES (?,?,?,?,?,?,?)",
+            "cure_floor_h,color) VALUES (?,?,?,?,?,?)",
             (ref, label, float(unit_mass_g), float(tolerance_g),
-             int(box_capacity), C.CURE_H, color))
+             C.CURE_H, color))
     return one(con, "SELECT * FROM articles WHERE ref=?", (ref,))
 
 

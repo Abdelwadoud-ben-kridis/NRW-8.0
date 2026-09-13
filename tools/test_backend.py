@@ -228,20 +228,22 @@ def test_whole_box_pick_overshoots_and_empties_the_box():
         cleanup(con)
 
 
-def test_insufficient_stock_reserves_nothing():
-    # Only 5 whole-box cores exist; asking for 40 must refuse the whole
-    # reservation instead of locking those 5 and reporting a shortfall.
+def test_insufficient_stock_opens_a_production_batch():
+    # Only 5 whole-box cores exist; asking for 40 must not reserve those 5
+    # nor refuse outright -- it opens a production batch for the whole 40,
+    # leaving existing stock completely untouched and available to others.
     con = fresh_con()
     try:
         W.create_box(con, 0.0, _bc(con), C.TARE_G + 5 * 206.0, "test")
         DB.update(con, "boxes", "box_id", "BOX-1", {"state": "READY"})
         plan = W.reserve(con, 100 * H, "NY-114", 40)
-        check("order is IMPOSSIBLE", plan["status"] == "IMPOSSIBLE")
-        check("nothing allocated", plan["qty_allocated"] == 0)
+        check("order is IN_PRODUCTION", plan["status"] == "IN_PRODUCTION")
+        check("nothing allocated yet", plan["qty_allocated"] == 0)
+        check("target is the full request", plan["target"] == 40)
         box = DB.one(con, "SELECT * FROM boxes WHERE box_id='BOX-1'")
-        check("box untouched, still READY", box["state"] == "READY")
-        check("box not locked", box["locked_by"] is None)
-        assert_pass(con, 100 * H, "insufficient stock")
+        check("existing box untouched, still READY", box["state"] == "READY")
+        check("existing box not locked", box["locked_by"] is None)
+        assert_pass(con, 100 * H, "insufficient stock opens a batch")
     finally:
         cleanup(con)
 
@@ -270,7 +272,7 @@ def test_reset_is_atomic_and_checks_pass():
         W.reset_all(con, keep_articles=False)
         check("boxes wiped", con.execute("SELECT COUNT(*) FROM boxes").fetchone()[0] == 0)
         check("slots rebuilt", con.execute("SELECT COUNT(*) FROM slots").fetchone()[0]
-             == C.SLOT_COUNT + C.STORAGE_SLOTS)
+             == C.SLOT_COUNT)
         check("meta checkpoint reset",
              float(DB.meta_get(con, "t_sim")) == C.CLOCK_START_SIM)
         assert_pass(con, 0.0, "reset")
@@ -354,74 +356,6 @@ def test_apply_pick_invalid_take_rolls_back_confirm():
         cleanup(con)
 
 
-def test_relocate_moves_ready_box_to_storage_and_frees_curing_slot():
-    con = fresh_con()
-    try:
-        res = W.create_box(con, 0.0, _bc(con), C.TARE_G + 10 * 206.0, "test")
-        box_id = res["box_id"]
-        curing_slot = res["slot"]["slot_id"]
-        DB.update(con, "boxes", "box_id", box_id, {"state": "READY"})
-
-        moved = W.relocate(con, 100 * H, box_id)
-        check("relocate reports the storage destination",
-             moved["to_slot"].startswith("STORAGE-"), moved)
-
-        row = DB.one(con, "SELECT * FROM boxes WHERE box_id=?", (box_id,))
-        check("box kept READY", row["state"] == "READY")
-        check("box now sits in the storage slot", row["slot_id"] == moved["to_slot"])
-        old_slot = DB.one(con, "SELECT * FROM slots WHERE slot_id=?", (curing_slot,))
-        check("old curing slot freed", old_slot["occupied_by"] is None)
-        new_slot = DB.one(con, "SELECT * FROM slots WHERE slot_id=?", (moved["to_slot"],))
-        check("new storage slot occupied by this box", new_slot["occupied_by"] == box_id)
-        check("new slot really is zone STORAGE", new_slot["zone"] == "STORAGE")
-        assert_pass(con, 100 * H, "relocate")
-    finally:
-        cleanup(con)
-
-
-def test_relocate_refuses_a_box_that_is_not_ready():
-    con = fresh_con()
-    try:
-        res = W.create_box(con, 0.0, _bc(con), C.TARE_G + 10 * 206.0, "test")
-        try:
-            W.relocate(con, 0.0, res["box_id"])
-            check("relocating a DRYING box raises", False)
-        except W.OpError:
-            check("relocating a DRYING box raises", True)
-        row = DB.one(con, "SELECT * FROM boxes WHERE box_id=?", (res["box_id"],))
-        check("box untouched by the refused relocate", row["state"] == "DRYING")
-    finally:
-        cleanup(con)
-
-
-def test_relocate_refuses_a_box_already_in_storage():
-    con = fresh_con()
-    try:
-        res = W.create_box(con, 0.0, _bc(con), C.TARE_G + 10 * 206.0, "test")
-        DB.update(con, "boxes", "box_id", res["box_id"], {"state": "READY"})
-        W.relocate(con, 100 * H, res["box_id"])
-        try:
-            W.relocate(con, 100 * H, res["box_id"])
-            check("relocating an already-stored box raises", False)
-        except W.OpError:
-            check("relocating an already-stored box raises", True)
-        assert_pass(con, 100 * H, "double relocate refusal")
-    finally:
-        cleanup(con)
-
-
-def test_relocated_box_keeps_fifo_position_and_stays_pickable():
-    con = fresh_con()
-    try:
-        W.create_box(con, 0.0, _bc(con), C.TARE_G + 40 * 206.0, "test")
-        DB.update(con, "boxes", "box_id", "BOX-1", {"state": "READY"})
-        W.relocate(con, 100 * H, "BOX-1")
-        plan = W.reserve(con, 100 * H, "NY-114", 40)
-        check("FIFO still picks the relocated box", plan["picks"]
-             and plan["picks"][0]["box_id"] == "BOX-1", plan)
-        assert_pass(con, 100 * H, "reserve after relocate")
-    finally:
-        cleanup(con)
 
 
 def test_register_barcode_rejects_duplicate_and_unknown_ref():
@@ -451,6 +385,115 @@ def test_barcode_carries_its_own_unit_mass_not_the_articles_average():
         res = W.create_box(con, 0.0, barcode_id, C.TARE_G + 37 * 210.0, "test")
         check("counts clean against the barcode's own unit mass",
              res["state"] == "DRYING" and res["quantity"] == 37, res)
+    finally:
+        cleanup(con)
+
+
+def test_batch_ships_once_every_box_has_cured():
+    con = fresh_con()
+    try:
+        plan = W.reserve(con, 0.0, "NY-114", 30)
+        check("order opened as a batch", plan["status"] == "IN_PRODUCTION")
+        order_id = plan["order_id"]
+
+        b1 = W.produce_for_batch(con, 0.0, order_id, _bc(con), C.TARE_G + 10 * 206.0, "test")
+        b2 = W.produce_for_batch(con, 0.0, order_id, _bc(con), C.TARE_G + 20 * 206.0, "test")
+        check("both batch boxes accepted",
+             b1["state"] == "DRYING" and b2["state"] == "DRYING", (b1, b2))
+        check("batch boxes tagged to the order",
+             DB.one(con, "SELECT batch_id FROM boxes WHERE box_id=?",
+                   (b1["box_id"],))["batch_id"] == order_id)
+
+        try:
+            W.confirm(con, 1.0, order_id)
+            check("shipping before curing is refused", False)
+        except W.OpError as e:
+            check("shipping before curing is refused", e.code == 409)
+
+        past_cure = 30 * H
+        res = W.confirm(con, past_cure, order_id)
+        check("batch ships once cured", res["ok"] and res["qty_allocated"] == 30, res)
+        row = DB.one(con, "SELECT * FROM orders WHERE order_id=?", (order_id,))
+        check("order is DONE", row["status"] == "DONE")
+        for bid in (b1["box_id"], b2["box_id"]):
+            box = DB.one(con, "SELECT * FROM boxes WHERE box_id=?", (bid,))
+            check("box %s emptied and released its slot" % bid,
+                 box["state"] == "EMPTY" and box["slot_id"] is None)
+        assert_pass(con, past_cure, "batch shipped")
+    finally:
+        cleanup(con)
+
+
+def test_batch_ships_short_when_a_box_is_quarantined():
+    con = fresh_con()
+    try:
+        plan = W.reserve(con, 0.0, "NY-114", 30)
+        order_id = plan["order_id"]
+        good = W.produce_for_batch(con, 0.0, order_id, _bc(con), C.TARE_G + 20 * 206.0, "test")
+        # a mismatched weight for this barcode -> quarantined, not DRYING
+        bad_bc = _bc(con)
+        bad = W.produce_for_batch(con, 0.0, order_id, bad_bc, C.TARE_G + 999.0, "test")
+        check("good box drying, bad box quarantined",
+             good["state"] == "DRYING" and bad["state"] == "QUARANTINE", (good, bad))
+
+        res = W.confirm(con, 30 * H, order_id)
+        check("batch ships short", res["ok"] and res["qty_allocated"] == 20 and res["short"], res)
+        row = DB.one(con, "SELECT * FROM orders WHERE order_id=?", (order_id,))
+        check("order still DONE despite the shortfall", row["status"] == "DONE")
+        assert_pass(con, 30 * H, "batch shipped short")
+    finally:
+        cleanup(con)
+
+
+def test_batch_refuses_to_ship_with_nothing_produced():
+    con = fresh_con()
+    try:
+        plan = W.reserve(con, 0.0, "NY-114", 30)
+        try:
+            W.confirm(con, 0.0, plan["order_id"])
+            check("shipping an empty batch raises", False)
+        except W.OpError:
+            check("shipping an empty batch raises", True)
+    finally:
+        cleanup(con)
+
+
+def test_cancelling_a_batch_releases_its_boxes_to_general_stock():
+    con = fresh_con()
+    try:
+        plan = W.reserve(con, 0.0, "NY-114", 30)
+        order_id = plan["order_id"]
+        box = W.produce_for_batch(con, 0.0, order_id, _bc(con), C.TARE_G + 30 * 206.0, "test")
+        W.cancel(con, 0.0, order_id)
+        row = DB.one(con, "SELECT * FROM boxes WHERE box_id=?", (box["box_id"],))
+        check("box's batch_id cleared", row["batch_id"] is None)
+        check("box otherwise untouched (still DRYING)", row["state"] == "DRYING")
+        order_row = DB.one(con, "SELECT * FROM orders WHERE order_id=?", (order_id,))
+        check("order is CANCELLED", order_row["status"] == "CANCELLED")
+
+        DB.update(con, "boxes", "box_id", box["box_id"], {"state": "READY"})
+        plan2 = W.reserve(con, 100 * H, "NY-114", 30)
+        check("released box is picked by a later FIFO order",
+             plan2["status"] == "PENDING" and
+             any(p["box_id"] == box["box_id"] for p in plan2["picks"]), plan2)
+        assert_pass(con, 100 * H, "batch cancelled and box reused")
+    finally:
+        cleanup(con)
+
+
+def test_produce_for_batch_refuses_a_non_production_order():
+    con = fresh_con()
+    try:
+        W.create_box(con, 0.0, _bc(con), C.TARE_G + 40 * 206.0, "test")
+        DB.update(con, "boxes", "box_id", "BOX-1", {"state": "READY"})
+        plan = W.reserve(con, 100 * H, "NY-114", 40)
+        check("this order was fully covered by FIFO", plan["status"] == "PENDING")
+        try:
+            W.produce_for_batch(con, 100 * H, plan["order_id"], _bc(con),
+                                C.TARE_G + 10 * 206.0, "test")
+            check("producing against a PENDING order raises", False)
+        except W.OpError as e:
+            check("producing against a PENDING order raises", e.code == 409)
     finally:
         cleanup(con)
 

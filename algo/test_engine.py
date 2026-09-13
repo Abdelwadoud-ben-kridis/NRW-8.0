@@ -12,7 +12,7 @@ from algo import engine as E
 
 H = 3600.0
 ART = {"ref": "NY-114", "label": "Noyau culasse 114",
-       "unit_mass_g": 206.0, "tolerance_g": 6.0, "box_capacity": 40}
+       "unit_mass_g": 206.0, "tolerance_g": 6.0}
 BARCODE = {"barcode_id": "BC-1", "ref": "NY-114", "unit_mass_g": 206.0}
 
 
@@ -63,20 +63,13 @@ def test_empty_box_is_quarantined():
     assert r["quantity"] == 0
 
 
-def test_overloaded_crate_is_quarantined():
-    # ART's box_capacity is 40 -- 45 matching cores would otherwise be a
-    # clean HAUTE-confidence accept, but no real crate holds 45 when it was
-    # built for 40.
-    gross = E.TARE_G + 45 * 206.0
+def test_a_large_clean_count_is_still_accepted():
+    # No declared capacity any more -- nobody knows how many cores are in a
+    # box ahead of time, that's the whole reason the scale exists. A large
+    # but clean count is accepted just like a small one.
+    gross = E.TARE_G + 90 * 206.0
     r = E.assess_box(BARCODE, ART, gross)
-    assert not r["accepted"] and r["state"] == "QUARANTINE"
-    assert "capacite" in r["reason"] and "45" in r["reason"] and "40" in r["reason"]
-
-
-def test_exactly_at_capacity_is_accepted():
-    gross = E.TARE_G + 40 * 206.0
-    r = E.assess_box(BARCODE, ART, gross)
-    assert r["accepted"] and r["quantity"] == 40
+    assert r["accepted"] and r["quantity"] == 90
 
 
 def test_each_barcode_carries_its_own_unit_mass():

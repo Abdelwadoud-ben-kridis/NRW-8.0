@@ -23,14 +23,6 @@ LEVELS = 17                     # 2 x 9 x 17 = 306 slots
                                  # clearance per slot on both axes
 SLOT_COUNT = FACES * COLS * LEVELS
 
-# A cured box either goes straight to production (confirm) or is moved out
-# of the curing rack into overflow storage elsewhere in the plant, freeing
-# its curing slot for a new arrival. This pool is deliberately separate from
-# the 306-slot curing rack (SLOT_COUNT) so the rack's own numbers never
-# change -- it is a flat, unranked pool, not part of the stacker-crane
-# geometry criterion.
-STORAGE_SLOTS = 12
-
 RACK_X_M = 5.6                  # 93 % of the 6 m room length
 RACK_Z_M = 4.8                  # 80 % of the 6 m ceiling, 1.2 m clearance
 CRANE_VX = 1.2                  # m/s travel

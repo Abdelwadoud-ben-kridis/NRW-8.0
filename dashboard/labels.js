@@ -8,7 +8,7 @@ export const EN = {
   clock: "Simulated clock", speed: "Speed", jump6: "+6 h", reset: "Reset",
   scenario: "Load demo scenario", more: "More", dbExplorer: "DB Explorer",
   newRef: "New reference", refCode: "Code", refLabel: "Label",
-  unitMass: "Unit mass (g)", capacity: "Box capacity", color: "Colour",
+  unitMass: "Unit mass (g)", color: "Colour",
   addRef: "Add reference", cancelRef: "Cancel",
   refAdded: (ref) => `Reference ${ref} added`,
   plant: "Plant model — core arrival",
@@ -34,13 +34,15 @@ export const EN = {
   demandTooMuch: (n) => `Only ${n} in stock for this reference — cannot request more.`,
   warehouse: "Warehouse",
   pendingOrders: "Pending reservations", lockExpiresIn: (s) => `expires in ${s} s`,
+  batchesTitle: "Production batches", noBatches: "No open production batches.",
+  batchOpened: "opened as a production batch — see below",
+  batchReady: "ready to ship", batchCuring: "curing",
+  batchEmpty: "no boxes produced yet", batchProduce: "Produce a box",
   lockExpired: "expired",
   kpiSlots: "Slots used", kpiReady: "Ready boxes", kpiDrying: "Curing",
   kpiQuar: "Quarantine", kpiCores: "Cores available", kpiFree: "Free slots",
-  kpiStorage: "Storage used",
   inventory: "Inventory", box: "Box", ref: "Ref", state: "State",
-  code: "Code", actions: "Actions", moveToStorage: "→ Storage",
-  zoneStorage: "STORAGE",
+  code: "Code",
   slot: "Slot", cure: "Cure", left: "Left", conf: "Confidence",
   counts: "Beam / Weight", stored: "Stored at", age: "Age",
   byRef: "Stock by reference", fifoHead: "next out (FIFO)", none: "none ready",
@@ -76,7 +78,7 @@ export const EN = {
 
   // --- crane -----------------------------------------------------------------
   stackerCrane: "Stacker crane", craneIdle: "IDLE", craneStore: "STORE",
-  cranePick: "PICK", craneRelocate: "TO STORAGE", craneNoCmd: "no active command",
+  cranePick: "PICK", craneNoCmd: "no active command",
 
   // --- curing preview ----------------------------------------------------
   curingModule: "Curing", curingNone: "no boxes curing",
@@ -151,8 +153,6 @@ export const EN = {
     `net mass ${net} g doesn't match barcode ${code} (${unit} g/core expected, gap ${gap} g)`,
   detUnknownBarcode: (id) => `unregistered barcode: ${id}`,
   detReusedBarcode: (id) => `barcode already used by ${id}`,
-  detOverCapacity: (qty, cap) =>
-    `${qty} cores exceeds this box type's capacity (${cap})`,
 };
 
 export const FR = {
@@ -162,7 +162,7 @@ export const FR = {
   clock: "Horloge simulée", speed: "Vitesse", jump6: "+6 h", reset: "Réinitialiser",
   scenario: "Charger le scénario démo", more: "Plus", dbExplorer: "Base de données",
   newRef: "Nouvelle référence", refCode: "Code", refLabel: "Libellé",
-  unitMass: "Masse unitaire (g)", capacity: "Capacité du box", color: "Couleur",
+  unitMass: "Masse unitaire (g)", color: "Couleur",
   addRef: "Ajouter la référence", cancelRef: "Annuler",
   refAdded: (ref) => `Référence ${ref} ajoutée`,
   plant: "Modèle physique",
@@ -189,13 +189,15 @@ export const FR = {
   demandTooMuch: (n) => `Seulement ${n} en stock pour cette référence — impossible de demander plus.`,
   warehouse: "Entrepôt",
   pendingOrders: "Réservations en attente",
+  batchesTitle: "Lots de production", noBatches: "Aucun lot de production en cours.",
+  batchOpened: "ouvert comme lot de production — voir ci-dessous",
+  batchReady: "prêt à expédier", batchCuring: "en séchage",
+  batchEmpty: "aucune caisse produite pour l'instant", batchProduce: "Produire une caisse",
   lockExpiresIn: (s) => `expire dans ${s} s`, lockExpired: "expirée",
   kpiSlots: "Emplacements", kpiReady: "Box prêts", kpiDrying: "En séchage",
   kpiQuar: "Quarantaine", kpiCores: "Noyaux disponibles", kpiFree: "Emplacements libres",
-  kpiStorage: "Stockage utilisé",
   inventory: "Inventaire", box: "Box", ref: "Réf", state: "État",
-  code: "Code", actions: "Actions", moveToStorage: "→ Stockage",
-  zoneStorage: "STOCKAGE",
+  code: "Code",
   slot: "Emplacement", cure: "Séchage", left: "Reste", conf: "Confiance",
   counts: "Barrière / Pesée", stored: "Stocké à", age: "Âge",
   byRef: "Stock par référence", fifoHead: "prochain sorti (FIFO)", none: "aucun prêt",
@@ -231,7 +233,7 @@ export const FR = {
 
   // --- crane -----------------------------------------------------------------
   stackerCrane: "Pont transstockeur", craneIdle: "INACTIF", craneStore: "RANGER",
-  cranePick: "PRÉLEVER", craneRelocate: "VERS STOCKAGE", craneNoCmd: "aucune commande active",
+  cranePick: "PRÉLEVER", craneNoCmd: "aucune commande active",
 
   // --- curing preview ----------------------------------------------------
   curingModule: "Séchage", curingNone: "aucun box en séchage",
@@ -303,8 +305,6 @@ export const FR = {
     `masse nette ${net} g incompatible avec le code-barre ${code} (${unit} g/noyau attendu, écart ${gap} g)`,
   detUnknownBarcode: (id) => `code-barre non enregistré : ${id}`,
   detReusedBarcode: (id) => `code-barre déjà utilisé par ${id}`,
-  detOverCapacity: (qty, cap) =>
-    `${qty} noyaux dépasse la capacité de cette caisse (${cap})`,
 };
 
 // Runtime language switch (dashboard/app.js's language toggle button), kept

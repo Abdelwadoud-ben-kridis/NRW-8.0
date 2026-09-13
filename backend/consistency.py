@@ -58,21 +58,15 @@ def run_checks(con, now_sim: float | None = None) -> dict:
                            "sqlite integrity_check / foreign_key_check failed: %s"
                            % (msgs or fk_errs)))
 
-    # --- DB2: rack geometry (+ overflow storage pool) matches config --------
-    n_curing = con.execute(
-        "SELECT COUNT(*) FROM slots WHERE zone='CURING'").fetchone()[0]
-    n_storage = con.execute(
-        "SELECT COUNT(*) FROM slots WHERE zone='STORAGE'").fetchone()[0]
-    if n_curing == C.SLOT_COUNT and n_storage == C.STORAGE_SLOTS:
-        checks.append(_row("DB2", "PASS",
-                           "slot count matches config geometry (%d curing + %d storage)"
-                           % (n_curing, n_storage)))
+    # --- DB2: rack geometry matches config -----------------------------------
+    n_slots = con.execute("SELECT COUNT(*) FROM slots").fetchone()[0]
+    if n_slots == C.SLOT_COUNT:
+        checks.append(_row("DB2", "PASS", "slot count matches config geometry (%d)" % n_slots))
     else:
         checks.append(_row("DB2", "FAIL",
-                           "slots table has %d curing / %d storage rows, config expects "
-                           "%d curing (FACES=%d COLS=%d LEVELS=%d) + %d storage -- reseed"
-                           % (n_curing, n_storage, C.SLOT_COUNT, C.FACES, C.COLS, C.LEVELS,
-                              C.STORAGE_SLOTS)))
+                           "slots table has %d rows, config geometry expects %d "
+                           "(FACES=%d COLS=%d LEVELS=%d) -- reseed"
+                           % (n_slots, C.SLOT_COUNT, C.FACES, C.COLS, C.LEVELS)))
 
     # --- S1/S2: box <-> slot back-reference agreement -----------------------
     mismatch = DB.rows(con, """
@@ -132,18 +126,9 @@ def run_checks(con, now_sim: float | None = None) -> dict:
     # --- B2: quantity bounds --------------------------------------------------
     bad = [b["box_id"] for b in boxes
            if not (0 <= b["qty_available"] <= b["qty_initial"])]
-    sev = "FAIL" if bad else "PASS"
-    warn_cap = []
-    if not bad:
-        arts = {a["ref"]: a for a in DB.rows(con, "SELECT * FROM articles")}
-        warn_cap = [b["box_id"] for b in boxes if b["article_ref"] in arts
-                   and b["qty_initial"] > arts[b["article_ref"]]["box_capacity"]]
-        if warn_cap:
-            sev = "WARN"
-    checks.append(_row("B2", sev,
+    checks.append(_row("B2", "FAIL" if bad else "PASS",
                        "0 <= qty_available <= qty_initial for every box" if not bad else
-                       "%d boxes have an impossible quantity" % len(bad),
-                       bad or warn_cap))
+                       "%d boxes have an impossible quantity" % len(bad), bad))
 
     # --- B3/B4/B5: state-specific shape --------------------------------------
     bad = [b["box_id"] for b in boxes
@@ -237,12 +222,18 @@ def run_checks(con, now_sim: float | None = None) -> dict:
     orders = DB.rows(con, "SELECT * FROM orders")
     bad_status, bad_picks, bad_qty, bad_ref = [], [], [], []
     for o in orders:
-        if o["status"] not in ("PENDING", "IMPOSSIBLE", "DONE", "CANCELLED"):
+        if o["status"] not in ("PENDING", "IN_PRODUCTION", "IMPOSSIBLE", "DONE", "CANCELLED"):
             bad_status.append(o["order_id"])
             continue
         plan = json.loads(o["payload"])
         if o["status"] == "IMPOSSIBLE" and plan.get("picks"):
             bad_picks.append(o["order_id"])
+        if "target" in plan:
+            # A production batch never populates picks[] -- its boxes are
+            # tagged via boxes.batch_id instead (backend/warehouse.py::
+            # reserve/_ship_batch), checked by O4. Nothing to cross-check
+            # against picks here.
+            continue
         # qty_allocated CAN exceed qty_requested: boxes are never split, so
         # covering an order sometimes means rounding up to the next whole
         # box (algo/engine.py::fifo_allocate). What must never happen is the
@@ -274,6 +265,15 @@ def run_checks(con, now_sim: float | None = None) -> dict:
                        "PENDING orders hold exactly their picks; closed orders hold none"
                        if not bad_ref else "%d orders disagree with their boxes" % len(bad_ref),
                        bad_ref))
+
+    known_orders = {o["order_id"] for o in orders}
+    orphan_batch = [b["box_id"] for b in boxes
+                   if b["batch_id"] and b["batch_id"] not in known_orders]
+    checks.append(_row("O4", "PASS" if not orphan_batch else "FAIL",
+                       "every box.batch_id references a real order"
+                       if not orphan_batch else
+                       "%d boxes reference an unknown batch order" % len(orphan_batch),
+                       orphan_batch))
 
     known_refs = {a["ref"] for a in DB.rows(con, "SELECT ref FROM articles")}
     unknown_ref = [o["order_id"] for o in orders if o["ref"] not in known_refs]
@@ -310,11 +310,11 @@ def run_checks(con, now_sim: float | None = None) -> dict:
     # --- A1: article sanity -----------------------------------------------------
     arts = DB.rows(con, "SELECT * FROM articles")
     bad_art = [a["ref"] for a in arts
-              if a["unit_mass_g"] <= 0 or a["tolerance_g"] <= 0 or a["box_capacity"] <= 0]
+              if a["unit_mass_g"] <= 0 or a["tolerance_g"] <= 0]
     warn_cure = [a["ref"] for a in arts if abs(a["cure_floor_h"] - C.CURE_H) > 0.01]
     sev = "FAIL" if bad_art else ("WARN" if warn_cure else "PASS")
     checks.append(_row("A1", sev,
-                       "articles have sane mass/tolerance/capacity" if not bad_art else
+                       "articles have sane mass/tolerance" if not bad_art else
                        "%d articles have an invalid field" % len(bad_art),
                        bad_art or warn_cure))
 

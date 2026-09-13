@@ -33,7 +33,7 @@ never be empty when they arrive. Six boxes, 34 simulated hours, three cured.
 | 4 | 0:50 | "Net weight ÷ that barcode's own registered per-noyau weight = 37, a clean division, so confidence HAUTE. The crane stores it and the clock starts — automatic timestamp, criterion 3." | point at the ESP32 pill, the new crate, and its barcode in the inventory row |
 | 5 | 1:00 | "Now the anomaly. Same barcode, but the physical cores don't match what it promised — swapped after labelling." → *pick "mismatch"* → "The weight doesn't line up with any clean multiple of the registered per-noyau mass, so it's **quarantined**. It never enters stock." | pick the anomaly, **A** |
 | 6 | 1:30 | "Production needs 60 NY-114." → press **D** → "The system proposes BOX-1 then BOX-3 — oldest first. And here is the part that matters: **it tells you what it refused and why**. BOX-5 is rejected, not because it is newer, but because it still needs 9 hours of drying. FIFO you can audit." | **D**, then **C** to confirm — **confirm before doing anything else**: a reservation auto-releases after 2 simulated hours (`LOCK_TTL_H`), and pressing **J** in beat 7 jumps +6 h, which would expire an unconfirmed order in full view of the jury |
-| 7 | 1:00 | "Two ideas for criterion 10. First: the system tells you not just what it will do, but **exactly why it refused everything else** — the FIFO rejected list, per box, per reason — and a built-in consistency checker (`/db`, the green PASS badge) proves the database itself is never in an inconsistent state, live, on demand. Second: curing capacity is precious, so a cured box that production hasn't asked for yet doesn't have to sit in the rack — one click moves it to overflow storage, freeing the slot for the next arrival, without losing its place in FIFO." | **J** (+6 h) to show a DRYING box crossing to READY; open `/db` to show the consistency badge; click **→ Storage** on a READY box to show it leave the rack |
+| 7 | 1:00 | "Two ideas for criterion 10. First: the system tells you not just what it will do, but **exactly why it refused everything else** — the FIFO rejected list, per box, per reason — and a built-in consistency checker (`/db`, the green PASS badge) proves the database itself is never in an inconsistent state, live, on demand. Second: when a demand can't be covered by existing stock at all — not just curing, genuinely absent — the system doesn't just refuse it. It opens a production batch, tracks it while it's made, and ships every box in it together the moment the last one finishes curing — no partial shipments, no manual bookkeeping." | **J** (+6 h) to show a DRYING box crossing to READY; open `/db` to show the consistency badge; press **D** for a reference with zero stock to show a batch open, then produce and ship it |
 
 Close: *"Everything you saw ran live. No video, no slides. The embedded board,
 the warehouse logic and the 3D are three separate programs talking over MQTT
@@ -107,8 +107,17 @@ not notice; neither will they.
 > barcode used twice: the second scan is refused as already consumed, so one
 > sticker can never be replayed onto two different physical boxes.
 
-**"What happens when the curing rack is full?"**
-> A cured box doesn't have to wait for a pickup order to leave the rack — it
-> can be relocated to overflow storage with one click, freeing its slot for
-> the next arrival immediately. It keeps its cure record and FIFO position,
-> so it's still the correct box to propose first when demand comes in.
+**"What if there's simply no stock at all for what's being asked?"**
+> Then it isn't a refusal any more — it's a production batch. The system
+> tracks exactly what's been produced for it and what's still curing, and
+> ships the whole batch together the instant the last box crosses 24 h. If
+> a box in that batch gets quarantined along the way, the rest still ships
+> — short, and flagged as short — rather than blocking forever on a
+> replacement nobody asked for.
+
+**"Doesn't that batch path let production skip the FIFO/audit story?"**
+> No — it only ever fires when existing stock, curing or not, genuinely
+> can't cover the request. Any demand that CAN be met from what's already
+> in the warehouse still goes through the exact same FIFO, oldest-box-first,
+> full-audit-trail path as always. The batch path is strictly the
+> make-to-order fallback, never a shortcut around it.

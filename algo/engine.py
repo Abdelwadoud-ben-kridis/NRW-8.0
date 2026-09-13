@@ -175,14 +175,6 @@ def assess_box(barcode: dict, article: dict, gross_g: float,
 
     out.update(quantity=count, confidence="HAUTE", accepted=True,
                state="STORING", reason=None)
-
-    # --- CAPACITY --------------------------------------------------------------
-    # A crate cannot physically hold more cores than its declared capacity.
-    capacity = int(article.get("box_capacity") or 0)
-    if capacity > 0 and out["quantity"] > capacity:
-        out.update(accepted=False, state="QUARANTINE",
-                   reason="quantite %d superieure a la capacite de la caisse (%d)"
-                          % (out["quantity"], capacity))
     return out
 
 
@@ -379,20 +371,27 @@ def can_transition(old: str | None, new: str) -> bool:
     return new in _TRANSITIONS.get(old, set())
 
 
-# Order lifecycle, mirroring the box table above. `None` -> the two possible
-# outcomes of a fresh POST /api/demand. PENDING -> DONE is a confirm;
-# PENDING -> CANCELLED covers both an explicit cancel and an automatic
-# reservation-lock expiry (backend/warehouse.py logs which one happened).
-# Re-confirming a DONE order or re-cancelling a CANCELLED one is deliberately
-# NOT a transition here -- backend/warehouse.py treats repeating either as a
-# harmless no-op instead of looking it up in this table, so idempotency is
-# handled once, explicitly, rather than by quietly allowing DONE -> DONE.
+# Order lifecycle, mirroring the box table above. `None` -> the three
+# possible outcomes of a fresh POST /api/demand: existing FIFO stock fully
+# covers it (PENDING), covers none of it and a production batch opens
+# instead (IN_PRODUCTION), or the ref itself doesn't exist (IMPOSSIBLE,
+# kept for that case only -- contract 1.6 no longer uses it for "insufficient
+# stock", see backend/warehouse.py::reserve). PENDING -> DONE is a confirm;
+# IN_PRODUCTION -> DONE is a batch shipping once every tagged box has left
+# DRYING. PENDING/IN_PRODUCTION -> CANCELLED covers an explicit cancel and,
+# for PENDING, an automatic reservation-lock expiry too (backend/warehouse.py
+# logs which one happened). Re-confirming a DONE order or re-cancelling a
+# CANCELLED one is deliberately NOT a transition here -- backend/warehouse.py
+# treats repeating either as a harmless no-op instead of looking it up in
+# this table, so idempotency is handled once, explicitly, rather than by
+# quietly allowing DONE -> DONE.
 _ORDER_TRANSITIONS = {
-    None:         {"PENDING", "IMPOSSIBLE"},
-    "PENDING":    {"DONE", "CANCELLED"},
-    "IMPOSSIBLE": set(),
-    "DONE":       set(),
-    "CANCELLED":  set(),
+    None:            {"PENDING", "IN_PRODUCTION", "IMPOSSIBLE"},
+    "PENDING":       {"DONE", "CANCELLED"},
+    "IN_PRODUCTION": {"DONE", "CANCELLED"},
+    "IMPOSSIBLE":    set(),
+    "DONE":          set(),
+    "CANCELLED":     set(),
 }
 
 

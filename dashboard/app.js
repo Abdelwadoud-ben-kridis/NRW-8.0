@@ -43,10 +43,9 @@ let refAvail = {};        // ref -> total READY cores, refreshed every snapshot 
 
 const hk = (k) => ` <span class="hk">${k}</span>`;
 
-// A worker sticks this on the physical crate before it reaches the scale
-// (CDC step 1, "identifier le noyau") -- backend/warehouse.py::_gen_code
-// generates the payload; this is purely a rendering of that string as bars,
-// nothing here is scanned back or feeds a decision.
+// A worker registers this barcode on the physical crate before it ever
+// reaches the conveyor (CDC step 1, "identifier le noyau") -- this just
+// renders the scanned-back code as bars, nothing here feeds a decision.
 function barcodeSvg(code) {
   const chars = String(code || "").split("");
   const w = 84, h = 20;
@@ -109,6 +108,7 @@ function paintLabels() {
   $("h-byref").textContent = L.byRef;
   $("h-prop").textContent = L.proposal;
   $("h-pending").textContent = L.pendingOrders;
+  $("h-batches").textContent = L.batchesTitle;
   $("h-inv").textContent = L.inventory;
   $("h-log").textContent = L.events;
   $("h-liveop").textContent = L.liveOperation;
@@ -133,7 +133,6 @@ function paintLabels() {
   $("l-refcode").textContent = L.refCode;
   $("l-reflabel").textContent = L.refLabel;
   $("l-refmass").textContent = L.unitMass;
-  $("l-refcap").textContent = L.capacity;
   $("l-refcolor").textContent = L.color;
   $("btn-nref-add").textContent = L.addRef;
   $("btn-nref-cancel").textContent = L.cancelRef;
@@ -178,9 +177,7 @@ function paintInvHead() {
     if (c.num) cls.push("num");
     if (invSort.key === c.key) cls.push(invSort.dir > 0 ? "sort-asc" : "sort-desc");
     return `<th data-key="${c.key}" class="${cls.join(" ")}">${c.label()}</th>`;
-  }).join("") + `<th class="actions">${L.actions}</th></tr>`;
-  // the trailing Actions column has no data-key -- it is not sortable, so it
-  // must not be wired into the click-to-sort handler below
+  }).join("") + "</tr>";
   $("invt").tHead.querySelectorAll("th[data-key]").forEach((th) => {
     th.onclick = () => {
       const k = th.dataset.key;
@@ -227,8 +224,6 @@ const tDet = (s) => {
   if (m) return L.detUnknownBarcode(m[1]);
   m = /^code-barre deja utilise par (.+)$/.exec(s);
   if (m) return L.detReusedBarcode(m[1]);
-  m = /^quantite (\d+) superieure a la capacite de la caisse \((\d+)\)$/.exec(s);
-  if (m) return L.detOverCapacity(m[1], m[2]);
   return s;
 };
 
@@ -402,7 +397,6 @@ function render(st) {
   // --- KPI ribbon: each tile with its unit spelled out ---
   const k = st.kpi;
   const pct = k.slots_total ? (k.slots_used / k.slots_total) * 100 : 0;
-  const storagePct = k.storage_total ? (k.storage_used / k.storage_total) * 100 : 0;
   $("kpi-ribbon").innerHTML = [
     `<div class="kpi-tile acc"><div class="v">${k.slots_total}</div><div class="k">${L.lang === "EN" ? "Total slots" : "Emplacements totaux"}</div></div>`,
     `<div class="kpi-tile acc"><div class="v">${k.slots_used}<small> / ${k.slots_total}</small></div>
@@ -412,9 +406,6 @@ function render(st) {
     `<div class="kpi-tile warn"><div class="v">${k.boxes_drying}</div><div class="k">${L.kpiDrying}</div></div>`,
     `<div class="kpi-tile bad${k.boxes_quarantine ? "" : " zero"}"><div class="v">${k.boxes_quarantine}</div><div class="k">${L.kpiQuar}</div></div>`,
     `<div class="kpi-tile ok"><div class="v">${k.cores_available}</div><div class="k">${L.kpiCores}</div></div>`,
-    `<div class="kpi-tile acc"><div class="v">${k.storage_used}<small> / ${k.storage_total}</small></div>
-       <div class="k">${L.kpiStorage}</div>
-       <div class="bar" style="margin-top:6px"><i style="width:${storagePct}%"></i></div></div>`,
   ].join("");
 
   // --- live operation stage ---
@@ -466,10 +457,7 @@ function render(st) {
   $("crane-body").innerHTML = cr.cmd === "idle" || !cr.box_id
     ? `<div class="crane-empty">${L.craneNoCmd}</div>`
     : `<div class="crane-line">
-         <span class="crane-cmd ${cr.cmd}">${
-           cr.cmd === "store" ? L.craneStore
-           : cr.cmd === "relocate" ? L.craneRelocate
-           : L.cranePick}</span>
+         <span class="crane-cmd ${cr.cmd}">${cr.cmd === "store" ? L.craneStore : L.cranePick}</span>
          <span>${cr.box_id}</span>
          <span class="crane-arrow">→</span>
          <span>${cr.slot_id || "—"}</span>
@@ -516,7 +504,8 @@ function render(st) {
       <div class="hd"><span>${o.order_id} · ${o.ref}</span>
         <span>${o.qty_allocated}/${o.qty_requested}</span></div>
       <div class="sub muted">
-        <span>${o.status === "CANCELLED" ? L.reservationReleased : (o.status || "")}</span>
+        <span>${o.status === "CANCELLED" ? L.reservationReleased
+              : o.status === "IN_PRODUCTION" ? L.batchOpened : (o.status || "")}</span>
         ${o.shortfall ? `<span style="color:#ff9a9a">${L.shortfall}: ${o.shortfall}</span>` : ""}
       </div>
       <div class="muted" style="margin-top:6px">${L.picks}</div>
@@ -557,41 +546,20 @@ function render(st) {
   $("invt").tBodies[0].innerHTML = rows.map((b) => {
     const picked = (o?.picks || []).some((p) => p.box_id === b.box_id);
     const done = b.cure_pct >= 100;
-    const canRelocate = b.state === "READY" && b.zone !== "STORAGE";
-    const busy = relocateBusy.has(b.box_id);
     return `<tr class="${picked ? "sel" : ""}" title="${tDet(b.reason) || ""}">
       <td>${b.box_id}</td>
       <td class="codecell">${barcodeSvg(b.code)}<div class="codetxt">${b.code || "—"}</div></td>
       <td>${b.ref || "—"}</td><td>${b.label || "—"}</td>
       <td class="num">${b.qty_initial}</td><td class="num">${b.qty_available}</td>
       <td><span class="tag s-${b.state}">${L.st[b.state] || b.state}</span></td>
-      <td>${b.slot_id || "—"}${b.zone === "STORAGE"
-            ? ` <span class="tag zone-storage">${L.zoneStorage}</span>` : ""}</td>
+      <td>${b.slot_id || "—"}</td>
       <td>${simLabel(b.t_in_sim)}</td>
       <td><div class="cure">
           <div class="bar ${done ? "done" : ""}"><i style="width:${b.cure_pct}%"></i></div>
           <span class="h">${done ? "✓" : b.cure_pct + "%"}</span></div></td>
       <td>${b.confidence || "—"}</td>
-      <td>${b.locked_by || "—"}</td>
-      <td class="actions">${canRelocate
-            ? `<button class="ghost" data-relocate="${b.box_id}" ${busy ? "disabled" : ""}>${L.moveToStorage}</button>`
-            : "—"}</td></tr>`;
-  }).join("") || `<tr><td colspan="${INV_COLS.length + 1}" class="muted">—</td></tr>`;
-
-  $("invt").tBodies[0].querySelectorAll("[data-relocate]").forEach((btn) => {
-    btn.onclick = async () => {
-      if (btn.disabled) return;
-      const boxId = btn.dataset.relocate;
-      relocateBusy.add(boxId);
-      btn.disabled = true;
-      try {
-        await api(`/box/${boxId}/relocate`, {});
-        renderLog();
-      } finally {
-        relocateBusy.delete(boxId);
-      }
-    };
-  });
+      <td>${b.locked_by || "—"}</td></tr>`;
+  }).join("") || `<tr><td colspan="${INV_COLS.length}" class="muted">—</td></tr>`;
 
   // --- banner ---
   if (st.banner && st.banner.t_sim !== lastBannerT) {
@@ -604,6 +572,7 @@ function render(st) {
   }
 
   renderPendingOrders(st);
+  renderBatches(st);
   if (activeView === "twin") updateTwin(st);
   firstRender = false;
 }
@@ -618,7 +587,6 @@ function render(st) {
 // the most recent demand) gets taken out or released.
 // ---------------------------------------------------------------------------
 const pendingOpBusy = new Set();   // order_ids with a confirm/cancel in flight
-const relocateBusy = new Set();    // box_ids with a relocate-to-storage in flight
 
 function renderPendingOrders(st) {
   const el = $("pending-orders");
@@ -662,6 +630,68 @@ function renderPendingOrders(st) {
 }
 
 // ---------------------------------------------------------------------------
+// production batches — a demand FIFO couldn't fully cover from existing
+// stock opens one of these instead of a flat refusal (backend/warehouse.py
+// ::reserve). Every box shown here is LIVE from boxes.batch_id, never
+// cached, so the progress list can never drift from what actually cured.
+// ---------------------------------------------------------------------------
+const batchOpBusy = new Set();      // order_ids with produce/ship/cancel in flight
+const batchQty = {};                // order_id -> last-typed produce qty
+
+function renderBatches(st) {
+  const el = $("batches-pending");
+  const rows = st.batches_pending || [];
+  el.innerHTML = !rows.length ? `<div class="muted">${L.noBatches}</div>` : rows.map((b) => {
+    const busy = batchOpBusy.has(b.order_id);
+    const qty = batchQty[b.order_id] ?? Math.max(1, b.target - b.produced);
+    return `<div class="resv-row" data-oid="${b.order_id}">
+        <div class="resv-top">
+          <span class="ref">${b.order_id} · ${b.ref} · ${b.produced}/${b.target}</span>
+          <span class="countdown ${b.ready_to_ship ? "normal" : "warning"}">${
+            b.ready_to_ship ? L.batchReady : L.batchCuring}</span>
+        </div>
+        ${b.boxes.length ? `<div class="batch-boxes">${b.boxes.map((x) =>
+          `<span class="tag s-${x.state}" title="${x.qty} ${L.cores}">${x.box_id}</span>`
+        ).join(" ")}</div>` : `<div class="muted">${L.batchEmpty}</div>`}
+        <div class="row tight">
+          <input type="number" min="1" class="f1" data-qty value="${qty}">
+          <button class="ghost" data-act="produce" ${busy ? "disabled" : ""}>${L.batchProduce}</button>
+        </div>
+        <div class="resv-actions">
+          <button class="ghost" data-act="ship" ${busy || !b.ready_to_ship ? "disabled" : ""}>${L.confirm}</button>
+          <button class="ghost" data-act="cancel" ${busy ? "disabled" : ""}>${L.cancel}</button>
+        </div>
+      </div>`;
+  }).join("");
+
+  el.querySelectorAll("[data-qty]").forEach((inp) => {
+    inp.oninput = () => { batchQty[inp.closest("[data-oid]").dataset.oid] = +inp.value; };
+  });
+
+  el.querySelectorAll("[data-act]").forEach((btn) => {
+    btn.onclick = async () => {
+      if (btn.disabled) return;
+      const row = btn.closest("[data-oid]");
+      const oid = row.dataset.oid;
+      batchOpBusy.add(oid);
+      row.querySelectorAll("button").forEach((b) => b.disabled = true);
+      try {
+        if (btn.dataset.act === "produce") {
+          const qty = +row.querySelector("[data-qty]").value || 1;
+          const ref = (st.batches_pending.find((b) => b.order_id === oid) || {}).ref;
+          await api("/sim/arrival", { ref, qty, batch_order_id: oid });
+        } else {
+          await api(`/demand/${btn.dataset.act}`, { order_id: oid });
+        }
+        renderLog();
+      } finally {
+        batchOpBusy.delete(oid);
+      }
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // database health — read-only GET /api/db/check (backend/consistency.py),
 // polled at a low rate since it re-scans the whole DB.
 // ---------------------------------------------------------------------------
@@ -688,7 +718,6 @@ function eventBits(kind, p) {
     case "box_in": return [p.box_id, p.ref, `${p.qty} ${L.cores}`, p.slot,
                            p.confidence, p.barcode_id];
     case "quarantine": return [p.box_id, p.ref || p.barcode_id, tDet(p.reason)];
-    case "box_relocated": return [p.box_id, p.ref, p.from_slot, "→", p.to_slot];
     case "barcode_registered": return [p.barcode_id, p.ref, `${p.unit_mass_g} g/noyau`];
     case "cured": return [p.box_id, `${p.after_h} h`];
     case "demand": return [p.order_id, p.ref, `${p.allocated}/${p.qty}`,
@@ -878,7 +907,7 @@ async function boot() {
   const openRefModal = () => {
     closeMenu();
     $("nref-ref").value = ""; $("nref-label").value = "";
-    $("nref-mass").value = ""; $("nref-cap").value = "";
+    $("nref-mass").value = "";
     $("nref-color").value = "#22d3ee";
     $("nref-err").hidden = true;
     $("refModal").hidden = false;
@@ -900,7 +929,6 @@ async function boot() {
       ref: $("nref-ref").value.trim(), label: $("nref-label").value.trim(),
       unit_mass_g: +$("nref-mass").value, color: $("nref-color").value,
     };
-    if ($("nref-cap").value) body.box_capacity = +$("nref-cap").value;
     if (!body.ref || !body.label || !(body.unit_mass_g > 0)) {
       $("nref-err").textContent = L.refCode + " / " + L.refLabel + " / " + L.unitMass;
       $("nref-err").hidden = false;
