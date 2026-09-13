@@ -838,10 +838,10 @@ async def api_demand(body: dict):
 async def api_demand_box(body: dict):
     """Criterion 6, contract 1.11: production asks for a specific box
     ("BOX-3 (28 units)"), never a quantity -- this is what the dashboard's
-    demand form uses. FIFO is enforced (W.reserve_box ->
-    engine.fifo_select_box): only the oldest pickable box of its reference is
-    reserved; any other box is refused with the reason and the box to use
-    first."""
+    demand form uses. Any READY box can be taken out (contract 1.12,
+    W.reserve_box -> engine.fifo_select_box); skipping an older ready box is
+    allowed but recorded (`fifo_override`). A box that isn't ready is
+    refused with its reason."""
     box_id = body.get("box_id")
     if not isinstance(box_id, str) or not box_id.strip():
         return JSONResponse({"error": "box_id is required"}, 400)

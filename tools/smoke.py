@@ -207,20 +207,21 @@ ghost = [b for b in st["boxes"] if b["code"] == "BC-NEVER-REGISTERED-2"][0]
 archived = call("/api/box/%s/archive" % ghost["box_id"], {})
 check("archive succeeds", archived.get("state") == "ARCHIVED", archived)
 
-# 13b. demand by box (contract 1.11) -- what the dashboard now uses. FIFO is
-# enforced: asking for a newer box is refused and names the box to use first.
+# 13b. demand by box (contract 1.11/1.12) -- what the dashboard now uses.
+# Any READY box can go out (a FIFO skip is recorded); a curing one cannot.
 call("/api/reset", {})
 call("/api/sim/box", {"ref": "NY-114", "qty": 40})
 call("/api/clock", {"jump_h": 1})
 call("/api/sim/box", {"ref": "NY-114", "qty": 28})
 call("/api/clock", {"jump_h": 25})
 time.sleep(0.4)
+call("/api/sim/box", {"ref": "NY-114", "qty": 10})          # BOX-3, just arrived
 p = call("/api/demand/box", {"box_id": "BOX-2"})
-check("box demand for a newer box refused, naming the FIFO head",
-      p["status"] == "IMPOSSIBLE" and p["fifo_head"] == "BOX-1", p)
-p = call("/api/demand/box", {"box_id": "BOX-1"})
-check("box demand for the FIFO head reserves it whole",
-      p["status"] == "PENDING" and p["picks"][0]["take"] == 40, p)
+check("box demand: a newer READY box is taken, FIFO skip recorded",
+      p["status"] == "PENDING" and p["fifo_override"] is True and p["fifo_head"] == "BOX-1", p)
+p = call("/api/demand/box", {"box_id": "BOX-3"})
+check("box demand: a curing box is refused",
+      p["status"] == "IMPOSSIBLE" and p["rejected"][0]["reason"] == "sechage insuffisant", p)
 
 # 14. the read-only consistency checker (backend/consistency.py) is green
 chk = call("/api/db/check")

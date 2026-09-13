@@ -3,7 +3,25 @@
 Owner: **P3 (dashboard / backend / site)**. Everyone codes against this file.
 If you change it, announce it out loud and bump the version line.
 
-    CONTRACT VERSION: 1.11
+    CONTRACT VERSION: 1.12
+
+Changes from 1.11 (operator chooses any ready box, 2026-09-13):
+
+- **Any READY box can be taken out.** `POST /api/demand/box` reserves the
+  requested box, whole, whenever it is pickable (cured, `READY`, not
+  reserved, not held for a batch) — no longer only when it is its
+  reference's FIFO head. FIFO is recommended and audited instead of
+  imposed: the plan's `fifo_head` still names the oldest ready box, new
+  `fifo_override` is `true` when the operator took a different one, and
+  each skipped older ready box is listed in `rejected[]` as
+  `"choix operateur"`, detail `"plus ancien que BOX-3 -- FIFO le proposait
+  en premier"` — so the skip is stored in the order and visible on screen.
+- **A box that isn't ready is still refused** (`IMPOSSIBLE`, nothing
+  locked, its own reason first, `eta_sim` when curing) — the 24 h rule is
+  not negotiable.
+- Dashboard: the FIFO head is still pre-selected and marked "next out";
+  curing boxes are listed with "ready in X h" but can't be selected; the
+  proposal panel shows "FIFO skipped: BOX-1 was older" on an override.
 
 Changes from 1.10 (demand by box, 2026-09-13):
 
@@ -532,7 +550,7 @@ it never crashes the MQTT listener, and telemetry/curing keep running.
 | GET    | `/api/barcodes?unused=true` | –                                 | `[{"barcode_id","ref","unit_mass_g","registered_sim","used_by_box"}]` |
 | POST   | `/api/sim/arrival`    | `{"barcode_id":"BC-1042","qty":37,"anomaly":"none"}` or `{"ref":"NY-114",...}` (auto-registers a throwaway barcode) — optional `"batch_order_id":"ORD-3"` tags the resulting box to that production batch | plays the plant model at 10 Hz, then L0/L1 as in §0 — this is the **A** hotkey. 400 if `qty` is not an integer in `[0, 500]` or `anomaly` is not a key of `GET /api/anomalies` (contract 1.10) |
 | POST   | `/api/demand`         | `{"ref":"NY-114","qty":40}`            | API-only since contract 1.11 (the dashboard demands by box). Allocation plan (§4) — `status` is `"PENDING"` (FIFO fully covered it), `"IN_PRODUCTION"` (opened a batch for the shortfall), or `"IMPOSSIBLE"` (nothing free to allocate); or `{"error":...}` (400: missing, invalid or unknown `ref` — contract 1.10 — or `qty` not a positive integer) |
-| POST   | `/api/demand/box`     | `{"box_id":"BOX-3"}`                   | contract 1.11 — what the dashboard uses. Reserves that box whole only if it is the oldest pickable box of its reference (`status: "PENDING"`); otherwise `status: "IMPOSSIBLE"`, nothing locked, requested box first in `rejected[]` with the reason, `fifo_head` naming the box to use first, `eta_sim` if it is still curing (§4). `{"error":...}` (400 missing `box_id`, 404 unknown box, 409 box with no identified reference) |
+| POST   | `/api/demand/box`     | `{"box_id":"BOX-3"}`                   | contract 1.11/1.12 — what the dashboard uses. Reserves that box whole whenever it is ready (`status: "PENDING"`); `fifo_head` names the oldest ready box of that reference and `fifo_override` is `true` if a different one was taken (skipped boxes listed as `"choix operateur"`). A box that isn't ready → `status: "IMPOSSIBLE"`, nothing locked, requested box first in `rejected[]` with its reason, `eta_sim` if it is still curing (§4). `{"error":...}` (400 missing `box_id`, 404 unknown box, 409 box with no identified reference) |
 | POST   | `/api/demand/oldest`  | – (no body)                            | contract 1.9: skip picking a reference — reserves whichever `READY`, non-batch box (any reference) has the oldest `t_in_sim`, whole. Same allocation plan shape as `/api/demand`, `qty_requested` set to that box's own `qty_available` so it never overshoots itself; or `{"error":"no ready boxes"}` (404) |
 | POST   | `/api/demand/confirm` | `{"order_id":"ORD-3"}`                 | PENDING: `{"ok":true,"already":false,"qty_allocated":N}`. IN_PRODUCTION: ships every READY box tagged to the batch — `{"ok":true,"already":false,"qty_allocated":N,"target":M,"short":bool}`, or a 409 naming which boxes are still curing. Confirming an already-DONE order returns `{"ok":true,"already":true}`; confirming a CANCELLED/IMPOSSIBLE/unknown order is `{"error":...}` (409/404) |
 | POST   | `/api/demand/cancel`  | `{"order_id":"ORD-3"}`                 | PENDING: releases its picks back to READY. IN_PRODUCTION: clears `batch_id` on its boxes, returning them to general stock. Both: `{"ok":true,"already":false,"released":[box_id,...]}` — cancelling an already-CANCELLED order returns `{"ok":true,"already":true}`; cancelling a DONE/IMPOSSIBLE/unknown order is `{"error":...}` (409/404) |
@@ -570,7 +588,7 @@ Server → client, one JSON object per frame, ~5 Hz:
 ```json
 {
   "type": "state",
-  "contract_version": "1.11",
+  "contract_version": "1.12",
   "t_sim": 93600.0,
   "speed": 1,
   "clock_label": "J+1 02:00",
@@ -712,20 +730,23 @@ unaccented ASCII, since that is also what `algo/test_engine.py` asserts on.
 accented French straight from the API.
 
 **Demand by box** (`POST /api/demand/box`, contract 1.11) returns the same
-shape plus `"box_requested"` and `"fifo_head"`; `qty_requested` is that
-box's own `qty_available`. Refused example:
+shape plus `"box_requested"`, `"fifo_head"` and `"fifo_override"`;
+`qty_requested` is that box's own `qty_available`. Operator took a newer
+ready box (contract 1.12):
 
 ```json
 { "order_id":"ORD-4", "ref":"NY-114", "box_requested":"BOX-3", "fifo_head":"BOX-1",
-  "qty_requested":28, "qty_allocated":0, "shortfall":28, "eta_sim":null, "picks":[],
-  "rejected":[ {"box_id":"BOX-3","reason":"plus recent (FIFO)","detail":"utiliser BOX-1 d'abord"},
+  "fifo_override":true, "qty_requested":28, "qty_allocated":28, "shortfall":0, "eta_sim":null,
+  "picks":[ {"box_id":"BOX-3","slot_id":"F0-C2-L1","take":28,"t_in_sim":25200.0,"rank":1,"partial":false} ],
+  "rejected":[ {"box_id":"BOX-1","reason":"choix operateur","detail":"plus ancien que BOX-3 -- FIFO le proposait en premier"},
                {"box_id":"BOX-5","reason":"sechage insuffisant","detail":"pret dans 9.0 h"} ],
-  "status":"IMPOSSIBLE" }
+  "status":"PENDING" }
 ```
 
-When the requested box IS the FIFO head it is the single pick (whole), and
-every newer pickable box of that reference is listed as `"plus recent
-(FIFO)"`, detail `"BOX-1 sort en premier"`.
+The requested box is always the single pick (whole). Newer ready boxes of
+that reference are listed as `"plus recent (FIFO)"`, detail `"BOX-3 sort
+en premier"`. A requested box that isn't ready gives `status:
+"IMPOSSIBLE"`, `picks: []`, and its own reason first in `rejected[]`.
 
 **The `rejected` list is not optional.** It is how the jury *sees* FIFO being
 enforced instead of taking your word for it. Render it on screen, always.

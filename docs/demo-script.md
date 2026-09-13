@@ -36,7 +36,7 @@ stop matching the screen.
 | 3 | 1:30 | "Before a box ever reaches the conveyor, a worker labels it and registers what it holds — a reference and that specific box's own per-noyau weight — right here in the dashboard. No one counts anything by hand; that registration is the only human input in the whole chain. The box arrives, its scanner reads the barcode back — a lookup, not a guess — then it loads onto the scale AND passes a vision station: two independent sensors on the way in. That raw weight goes over MQTT to the ESP32 — **the board is never told the answer**, it just tares, waits for the mass to settle, and reports. Watch its own OLED — that's the board's own view of the same weighing, live." | register a barcode, then **A** (box arrives) — point at the Wokwi OLED as it moves TARE → WEIGHING → STABLE |
 | 4 | 0:50 | "Net weight ÷ that barcode's own registered per-noyau weight = 37 — the scale's count is the quantity. The vision station confirms the shape really is an NY-114, and its own core count can only come in at or under the scale's, never over, because a camera can miss a core hidden behind another but can't invent one. Confidence HAUTE on both identity and count. The crane stores it and the clock starts — automatic timestamp." (If it reads MOYENNE: "the numbers were within two cores but not clean enough to call HAUTE — it says so instead of pretending.") | point at the ESP32 pill, the vision-id readout, the new crate, and its barcode in the inventory row |
 | 5 | 1:00 | "Now the anomaly. A crate labelled NY-114, but the physical cores inside don't match what its barcode promised — swapped after labelling." → *pick "mismatch"* → "Watch: even when the weight alone could coincidentally look clean for some quantities, the camera sees a shape that doesn't match this barcode's declared reference, so it's **quarantined** immediately. It never enters stock." | pick the anomaly, **A** |
-| 6 | 1:30 | "Production needs cores. Nobody types a quantity — the operator picks a box, and every box is listed with what's in it, oldest first. Let me try to take BOX-3, 28 units." → press **D** → "Refused, and **it tells you why**: BOX-1 is older and already cured — use it first. FIFO isn't a suggestion here, it's enforced. And BOX-5 is listed too: not because it's newer, but because it still needs 9 hours of drying." → pick BOX-1 → **D** → "BOX-1, 40 units, reserved whole — no crate gets split on a spreadsheet." | **Box: BOX-3 (28 units) · NY-114** → **D** (refused, reasons on screen) → **Box: BOX-1 (40 units) · NY-114 · next out** → **D**, then **C** to confirm — **confirm before doing anything else**: a reservation auto-releases after 2 simulated hours (`LOCK_TTL_H`), and pressing **J** in beat 7 jumps +6 h, which would expire an unconfirmed order in full view of the jury |
+| 6 | 1:30 | "Production needs cores. Nobody types a quantity — the operator picks a box, and every box is listed with what's in it, oldest first. The system proposes BOX-1: the oldest cured NY-114, marked next out." → press **D** → "Reserved whole — no crate gets split on a spreadsheet. And **it tells you what it passed over and why**: BOX-5 still needs 9 hours of drying — you can see it in the list, but you can't pick it. The operator keeps the final say: any cured box can go out — but take a newer one over an older one and the system records the FIFO skip, on screen and in the order." | **Box: BOX-1 (40 units) · NY-114 · next out** (pre-selected) → **D**, then **C** to confirm. Optional, if asked about operator choice: pick **BOX-3** → **D** → "FIFO skipped: BOX-1 was older" → **Cancel** — **confirm before doing anything else**: a reservation auto-releases after 2 simulated hours (`LOCK_TTL_H`), and pressing **J** in beat 7 jumps +6 h, which would expire an unconfirmed order in full view of the jury |
 | 7 | 1:00 | "Two ideas for criterion 10. First: the system tells you not just what it will do, but **exactly why it refused everything else** — the FIFO rejected list, per box, per reason — and a built-in consistency checker (`/db`, the green PASS badge) proves the database itself is never in an inconsistent state, live, on demand. Second: quarantine isn't a dead end, but it isn't a loophole either. A box flagged over a bad weighing can be re-weighed back into the cure cycle — but watch what happens when I try that on the crate the camera caught: **a re-weigh can't clear what the vision station saw.** It needs a fresh vision reading, so we archive it." | **J** (+6 h): BOX-4 crosses to READY (watch the banner). Open `/db`: PASS badge. Quarantine: on the beat-5 box press **Re-weigh** → refused, reason names the vision reading → press **Archive**. |
 
 Close: *"Everything you saw ran live. No video, no slides. The embedded board,
@@ -54,9 +54,10 @@ J  +6 simulated hours S  load the demo scenario R  reset
 ```
 
 **D** requests the box selected in the Production demand list — a box,
-never a quantity (contract 1.11). The hint under the list says in advance
-whether FIFO will accept it; picking a box that isn't "next out" is still
-sent, because the refusal and its reason are the point.
+never a quantity (contract 1.11). "Next out" (the FIFO proposal) is
+pre-selected. Any ready box can be requested; a newer one is recorded as a
+FIFO skip (contract 1.12). Curing boxes are listed with "ready in X h" but
+can't be selected.
 
 ---
 
@@ -125,9 +126,16 @@ not notice; neither will they.
 **"Why pick a box instead of asking for a quantity?"**
 > Because the crate is the physical unit on the floor — the crane moves
 > boxes, not cores. Picking a box, with its contents shown, is exactly what
-> an operator does; the system's job is to make sure it's the RIGHT box.
-> That's why picking anything but the oldest cured box of that reference is
-> refused, with the box to take first named on screen.
+> an operator does. The system proposes the right one — the oldest cured
+> box, pre-selected — and never lets an uncured box out. The operator keeps
+> the final say among cured boxes (a quality hold, an urgent job), but a
+> FIFO skip is never silent: it's shown and stored in the order.
+
+**"So FIFO is optional?"**
+> The recommendation isn't: it's computed and proposed every time. What's
+> optional is overriding it, and every override names the older box that
+> was skipped — in the proposal panel and in the order record. That's
+> auditable FIFO, not a spreadsheet anyone can quietly ignore.
 
 **"What if there's simply no stock at all for what's being asked?"**
 > The list only offers boxes that exist, so the dashboard can't promise

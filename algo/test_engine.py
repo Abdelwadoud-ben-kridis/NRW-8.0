@@ -239,7 +239,7 @@ def test_mismatch_anomaly_is_caught_end_to_end_for_every_quantity():
             assert not r["accepted"], (art["ref"], qty, r)
 
 
-# --- criteria 5 + 6: demand by box, FIFO enforced (contract 1.11) -----------
+# --- criteria 5 + 6: demand by box, any ready box, FIFO audited (1.11/1.12) --
 
 def _demo_boxes(**overrides):
     return [_box("BOX-1", "NY-114", 0.0, "READY", qty=40, **overrides.get("BOX-1", {})),
@@ -250,19 +250,23 @@ def _demo_boxes(**overrides):
 
 def test_box_demand_reserves_the_fifo_head_whole():
     p = E.fifo_select_box(_demo_boxes(), "BOX-1", 34 * H, "ORD-1")
-    assert p["status"] == "PENDING" and p["fifo_head"] == "BOX-1"
+    assert p["status"] == "PENDING" and p["fifo_head"] == "BOX-1" and p["fifo_override"] is False
     assert [x["box_id"] for x in p["picks"]] == ["BOX-1"] and p["picks"][0]["take"] == 40
     assert p["qty_requested"] == p["qty_allocated"] == 40 and not p["picks"][0]["partial"]
     assert {r["box_id"]: r["reason"] for r in p["rejected"]} == {
         "BOX-3": "plus recent (FIFO)", "BOX-5": "sechage insuffisant"}   # other refs untouched
 
 
-def test_box_demand_for_a_newer_box_is_refused_naming_the_fifo_head():
+def test_operator_can_take_any_ready_box_and_the_fifo_skip_is_recorded():
+    # contract 1.12: a newer READY box can go out -- FIFO is recommended and
+    # audited, not imposed. The skipped older box is named in the order.
     p = E.fifo_select_box(_demo_boxes(), "BOX-3", 34 * H)
-    assert p["status"] == "IMPOSSIBLE" and p["picks"] == [] and p["qty_allocated"] == 0
-    assert p["fifo_head"] == "BOX-1"
-    assert p["rejected"][0] == {"box_id": "BOX-3", "reason": "plus recent (FIFO)",
-                                "detail": "utiliser BOX-1 d'abord", "t_in_sim": 7 * H}
+    assert p["status"] == "PENDING" and [x["box_id"] for x in p["picks"]] == ["BOX-3"]
+    assert p["picks"][0]["take"] == 28 and p["qty_allocated"] == 28
+    assert p["fifo_head"] == "BOX-1" and p["fifo_override"] is True
+    assert p["rejected"][0] == {"box_id": "BOX-1", "reason": "choix operateur",
+                                "detail": "plus ancien que BOX-3 -- FIFO le proposait en premier",
+                                "t_in_sim": 0.0}
 
 
 def test_box_demand_for_a_curing_box_is_refused_with_its_eta():

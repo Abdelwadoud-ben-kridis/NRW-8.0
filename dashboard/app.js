@@ -224,8 +224,8 @@ const tDet = (s) => {
   if (m) return L.detVisionRecount(m[1], m[2], m[3]);
   m = /^ecart de comptage : pesee (\d+), vision (\d+) noyaux$/.exec(s);
   if (m) return L.detCountGap(m[1], m[2]);
-  m = /^utiliser (\S+) d'abord$/.exec(s);
-  if (m) return L.detUseFirst(m[1]);
+  m = /^plus ancien que (\S+) -- FIFO le proposait en premier$/.exec(s);
+  if (m) return L.detOlderSkipped(m[1]);
   m = /^(\S+) sort en premier$/.exec(s);
   if (m) return L.detGoesFirst(m[1]);
   return s;
@@ -531,6 +531,7 @@ function render(st) {
         <span>${o.status === "CANCELLED" ? L.reservationReleased
               : o.status === "IN_PRODUCTION" ? L.batchOpened : (o.status || "")}</span>
         ${o.shortfall ? `<span style="color:#ff9a9a">${L.shortfall}: ${o.shortfall}</span>` : ""}
+        ${o.fifo_override ? `<span style="color:#ffb545">${L.fifoSkipped(o.fifo_head)}</span>` : ""}
         ${o.status !== "IMPOSSIBLE" ? ""
           : o.box_requested
             ? `<span style="color:#ff9a9a">${o.eta_sim != null ? L.etaBox(simLabel(o.eta_sim))
@@ -835,11 +836,12 @@ async function refreshBarcodes() {
 }
 
 // Demand by box (contract 1.11): the operator picks a specific box
-// ("BOX-3 (28 units) · NY-114"), never a quantity. Offered in FIFO order
-// (st.boxes is already sorted by engine.fifo_key), READY and still-curing
-// boxes, with each reference's FIFO head marked "next out". FIFO is ENFORCED
-// by the backend (engine.fifo_select_box): picking any other box is refused
-// with the reason -- the hint below only previews that, it decides nothing.
+// ("BOX-3 (28 units) · NY-114"), never a quantity, and may take out ANY box
+// that is ready (contract 1.12). Offered in FIFO order (st.boxes is already
+// sorted by engine.fifo_key); each reference's FIFO head is marked "next
+// out" and pre-selected. Curing boxes are shown but can't be selected --
+// the 24 h rule is not optional. Taking a newer ready box is allowed; the
+// backend records the FIFO skip (fifo_override) and the panel shows it.
 function renderBoxPicker(st) {
   boxHeadOf = {};
   (st.by_ref || []).forEach((r) => { if (r.fifo_head) boxHeadOf[r.ref] = r.fifo_head; });
@@ -847,17 +849,21 @@ function renderBoxPicker(st) {
   boxRows = st.boxes.filter((b) => b.slot_id && b.ref && !b.batch_id &&
     (b.state === "READY" || b.state === "DRYING") && b.qty_available > 0);
   const sig = L.lang + "|" + boxRows.map((b) =>
-    `${b.box_id}:${b.state}:${b.qty_available}:${isHead(b) ? 1 : 0}`).join(",");
+    `${b.box_id}:${b.state}:${b.qty_available}:${isHead(b) ? 1 : 0}:${b.state === "DRYING" ? b.h_remaining : ""}`).join(",");
   const sel = $("dbox");
   if (sig !== boxPickerSig) {
     boxPickerSig = sig;
     const prev = sel.value;
+    const ready = boxRows.filter((b) => b.state === "READY");
     sel.innerHTML = boxRows.length
-      ? boxRows.map((b) => `<option value="${b.box_id}">${b.box_id} (${L.unitsN(b.qty_available)}) · ${b.ref}${
+      ? boxRows.map((b) => `<option value="${b.box_id}"${b.state === "DRYING" ? " disabled" : ""}>${
+          b.box_id} (${L.unitsN(b.qty_available)}) · ${b.ref}${
           isHead(b) ? " · " + L.nextOutShort
-          : b.state === "DRYING" ? " · " + L.st.DRYING.toLowerCase() : ""}</option>`).join("")
+          : b.state === "DRYING" ? " · " + L.readyInShort(Number(b.h_remaining).toFixed(1)) : ""}</option>`).join("")
       : `<option value="">${L.noBoxes}</option>`;
-    if (boxRows.some((b) => b.box_id === prev)) sel.value = prev;
+    if (!ready.length && boxRows.length) sel.insertAdjacentHTML("afterbegin",
+      `<option value="" selected>${L.noReadyBoxes}</option>`);
+    if (ready.some((b) => b.box_id === prev)) sel.value = prev;
     else {
       const head = boxRows.find(isHead);
       if (head) sel.value = head.box_id;
@@ -869,10 +875,10 @@ function renderBoxPicker(st) {
 function updateBoxHint() {
   const b = boxRows.find((x) => x.box_id === $("dbox").value);
   let txt, warn = true;
-  if (!b) txt = L.noBoxes;
+  if (!b) txt = boxRows.length ? L.noReadyBoxes : L.noBoxes;
   else if (boxHeadOf[b.ref] === b.box_id) { txt = L.boxIsHead(b.ref); warn = false; }
   else if (b.state === "DRYING") txt = L.boxCuring(b.h_remaining);
-  else txt = L.boxNotHead(boxHeadOf[b.ref]);
+  else txt = L.boxOverride(boxHeadOf[b.ref]);
   $("dem-avail").textContent = txt;
   $("dem-avail").classList.toggle("over", warn);
 }

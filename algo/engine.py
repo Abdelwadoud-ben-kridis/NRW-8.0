@@ -441,15 +441,19 @@ def fifo_allocate(boxes: list, ref: str, qty: int, now_sim: float,
 def fifo_select_box(boxes: list, box_id: str, now_sim: float,
                     order_id: str = "ORD-0") -> dict | None:
     """The operator names a specific box ("BOX-3 (28 units)") instead of a
-    quantity (contract 1.11). FIFO is still ENFORCED, not advisory:
+    quantity (contract 1.11) and may take out ANY box that is ready
+    (contract 1.12). FIFO is recommended and audited, not imposed; the 24 h
+    cure and every other availability rule still are:
 
-      - the box is reserved, whole, only if it is the oldest pickable box of
-        its reference (the FIFO head) -> status PENDING;
-      - otherwise nothing is reserved (status IMPOSSIBLE) and `rejected`
-        says why, with the requested box listed FIRST: "plus recent (FIFO)"
-        naming the box to use first, or its own non-pickable reason
-        (curing, reserved, quarantine, held for a batch...). `fifo_head`
-        names the box that should go out instead.
+      - a pickable box (cured, READY, not reserved, not held for a batch) is
+        reserved whole -> status PENDING. `fifo_head` names the oldest
+        pickable box of that reference; if the operator took a different
+        one, `fifo_override` is true and each older ready box is listed in
+        `rejected` as "choix operateur" -- skipping FIFO is always visible
+        and recorded in the order, never silent;
+      - a box that is not pickable is refused (status IMPOSSIBLE, nothing
+        reserved) with its own reason listed FIRST (curing, reserved,
+        quarantine, held for a batch...), and `eta_sim` when it is curing.
 
     Same classification as fifo_allocate (_classify), so the two paths can
     never disagree about what is pickable or why. Returns None for an unknown
@@ -463,25 +467,33 @@ def fifo_select_box(boxes: list, box_id: str, now_sim: float,
     qty = int(target["qty_available"])
     head = pickable[0] if pickable else None
     plan = {"order_id": order_id, "ref": ref, "box_requested": box_id,
-            "fifo_head": head["box_id"] if head else None,
+            "fifo_head": head["box_id"] if head else None, "fifo_override": False,
             "qty_requested": qty, "eta_sim": None}
 
-    if head is not None and head["box_id"] == box_id:
-        for b in pickable[1:]:
-            rejected.append({"box_id": b["box_id"], "reason": "plus recent (FIFO)",
-                             "detail": "%s sort en premier" % box_id,
-                             "t_in_sim": b["t_in_sim"]})
-        plan.update(qty_allocated=qty, shortfall=0, status="PENDING", rejected=rejected,
+    if any(b["box_id"] == box_id for b in pickable):
+        tkey = fifo_key(target)
+        for b in pickable:
+            if b["box_id"] == box_id:
+                continue
+            if fifo_key(b) < tkey:
+                rejected.append({"box_id": b["box_id"], "reason": "choix operateur",
+                                 "detail": "plus ancien que %s -- FIFO le proposait en premier"
+                                           % box_id,
+                                 "t_in_sim": b["t_in_sim"]})
+            else:
+                rejected.append({"box_id": b["box_id"], "reason": "plus recent (FIFO)",
+                                 "detail": "%s sort en premier" % box_id,
+                                 "t_in_sim": b["t_in_sim"]})
+        # the skipped older boxes first -- they are the FIFO audit trail
+        rejected.sort(key=lambda r: r["reason"] != "choix operateur")
+        plan.update(fifo_override=head["box_id"] != box_id, qty_allocated=qty,
+                    shortfall=0, status="PENDING", rejected=rejected,
                     picks=[{"box_id": box_id, "slot_id": target.get("slot_id"),
                             "take": qty, "t_in_sim": target["t_in_sim"],
                             "rank": 1, "partial": False}])
         return plan
 
-    if any(b["box_id"] == box_id for b in pickable):
-        rejected.append({"box_id": box_id, "reason": "plus recent (FIFO)",
-                         "detail": "utiliser %s d'abord" % head["box_id"],
-                         "t_in_sim": target["t_in_sim"]})
-    # the requested box's own entry first -- it is the answer to "why not?"
+    # not ready: the requested box's own entry first -- it answers "why not?"
     rejected.sort(key=lambda r: r["box_id"] != box_id)
     if target["state"] == "DRYING" and not is_cured(
             target["t_in_sim"], target["required_cure_h"], now_sim):

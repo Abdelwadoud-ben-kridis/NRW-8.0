@@ -338,11 +338,12 @@ def _lock_picks(con, plan: dict, order_id: str, now_sim: float) -> float:
 
 def reserve_box(con, now_sim: float, box_id: str) -> dict:
     """Demand by box (contract 1.11): production names a specific box, never
-    a quantity. FIFO stays enforced -- algo.engine.fifo_select_box reserves
-    the box (whole) only if it is the oldest pickable box of its reference;
-    otherwise the order is recorded as IMPOSSIBLE with the reason and the box
-    to use first, exactly like any other refusal, and nothing is locked.
-    Same single IMMEDIATE transaction and CAS locking as reserve().
+    a quantity, and may take out any box that is ready (contract 1.12) --
+    algo.engine.fifo_select_box reserves it whole, recording in the order
+    when an older ready box was skipped (`fifo_override`, "choix operateur").
+    A box that isn't ready is recorded as IMPOSSIBLE with its reason, like
+    any other refusal, and nothing is locked. Same single IMMEDIATE
+    transaction and CAS locking as reserve().
     """
     with DB.transaction(con):
         sweep_cured(con, now_sim)

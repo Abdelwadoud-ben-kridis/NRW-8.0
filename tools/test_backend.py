@@ -661,28 +661,33 @@ def test_recount_box_refuses_without_a_known_barcode():
         cleanup(con)
 
 
-def test_box_demand_locks_only_the_fifo_head():
-    # contract 1.11: demand by box, FIFO enforced at the DB layer too.
+def test_box_demand_takes_any_ready_box_but_never_a_curing_one():
+    # contract 1.11/1.12: demand by box -- any READY box can go out (a FIFO
+    # skip is recorded, not refused); a box that isn't cured never can.
     con = fresh_con()
     try:
         W.create_box(con, 0.0, _bc(con), C.TARE_G + 40 * 206.0, "test")
         W.create_box(con, 1 * H, _bc(con), C.TARE_G + 28 * 206.0, "test")
+        W.create_box(con, 20 * H, _bc(con), C.TARE_G + 10 * 206.0, "test")   # still curing at 30 h
         now = 30 * H
-        refused = W.reserve_box(con, now, "BOX-2")
-        check("newer box refused, FIFO head named",
-             refused["status"] == "IMPOSSIBLE" and refused["fifo_head"] == "BOX-1", refused)
+        newer = W.reserve_box(con, now, "BOX-2")
+        check("a newer READY box can be taken, FIFO skip recorded",
+             newer["status"] == "PENDING" and newer["fifo_override"] is True
+             and newer["fifo_head"] == "BOX-1" and newer["picks"][0]["take"] == 28, newer)
         row2 = DB.one(con, "SELECT * FROM boxes WHERE box_id='BOX-2'")
-        check("refused box is not locked", row2["state"] == "READY" and row2["locked_by"] is None)
+        check("that box is locked by its order",
+             row2["state"] == "RESERVED" and row2["locked_by"] == newer["order_id"])
         ok = W.reserve_box(con, now, "BOX-1")
-        check("FIFO head reserved whole",
-             ok["status"] == "PENDING" and ok["picks"][0]["take"] == 40, ok)
-        row1 = DB.one(con, "SELECT * FROM boxes WHERE box_id='BOX-1'")
-        check("head locked by that order",
-             row1["state"] == "RESERVED" and row1["locked_by"] == ok["order_id"])
+        check("the FIFO head can still be taken, no override",
+             ok["status"] == "PENDING" and ok["fifo_override"] is False, ok)
+        curing = W.reserve_box(con, now, "BOX-3")
+        check("a box that isn't cured is refused with its reason",
+             curing["status"] == "IMPOSSIBLE"
+             and curing["rejected"][0]["reason"] == "sechage insuffisant", curing)
+        row3 = DB.one(con, "SELECT * FROM boxes WHERE box_id='BOX-3'")
+        check("refused box is not locked", row3["state"] == "DRYING" and row3["locked_by"] is None)
         W.confirm(con, now, ok["order_id"])
-        nxt = W.reserve_box(con, now, "BOX-2")
-        check("once the head has shipped, the next box is reservable",
-             nxt["status"] == "PENDING", nxt)
+        W.confirm(con, now, newer["order_id"])
         try:
             W.reserve_box(con, now, "BOX-99")
             check("unknown box raises", False)
