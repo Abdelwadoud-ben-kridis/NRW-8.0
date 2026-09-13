@@ -90,7 +90,7 @@ check("BOX-2 emptied and released its slot", b2["state"] == "EMPTY" and not b2["
 call("/api/reset", {})
 art = [a for a in call("/api/articles") if a["ref"] == "NY-114"][0]
 call("/api/sim/env", {"t_c": 24.0, "rh": 52.0})
-res = call("/api/sim/arrival", {"ref": "NY-114", "qty": 30, "anomaly": "delta"})
+res = call("/api/sim/arrival", {"ref": "NY-114", "qty": 30, "anomaly": "mismatch"})
 st = call("/api/state")
 check("anomaly box quarantined",
       any(b["state"] == "QUARANTINE" for b in st["boxes"]),
@@ -160,13 +160,16 @@ ev = call("/api/events?limit=10")
 check("an order_expired event was logged",
       any(e["kind"] == "order_expired" for e in ev), [e["kind"] for e in ev])
 
-# 11. unknown reference is quarantined WITHOUT polluting a real article
-# (finding F7 -- it used to be misfiled under NY-114)
+# 11. an unregistered barcode is quarantined WITHOUT polluting a real
+# article (finding F7 -- it used to be misfiled under NY-114). Since
+# identification moved to a barcode scan (contract 1.5), this is what an
+# "unknown reference" arrival looks like now: a scanner reading a code that
+# was never registered.
 call("/api/reset", {})
-call("/api/sim/box", {"ref": "NOPE-999", "qty": 10})
+call("/api/sim/box", {"barcode_id": "BC-NEVER-REGISTERED", "qty": 10})
 st = call("/api/state")
 bad = [b for b in st["boxes"] if b["state"] == "QUARANTINE"]
-check("unknown ref quarantined", len(bad) == 1, bad)
+check("unknown barcode quarantined", len(bad) == 1, bad)
 check("does not pollute NY-114's article", bad[0]["ref"] is None, bad[0]["ref"])
 
 # 12. the read-only consistency checker (backend/consistency.py) is green

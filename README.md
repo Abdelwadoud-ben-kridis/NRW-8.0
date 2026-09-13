@@ -50,8 +50,8 @@ python tools/fake_device.py
 
 | # | Task (CDC §4) | Points | Where it is |
 |---|----------------|--------|-------------|
-| 1 | Identify the core / its model | 15 | `algo/engine.py::assess_box` — unit-mass check against the declared reference |
-| 2 | Deduce the quantity | 15 | same function — barrier count × mass count, cross-checked |
+| 1 | Identify the core / its model | 15 | a barcode scan (`backend/warehouse.py::register_barcode`/`create_box`) — a lookup, not a guess |
+| 2 | Deduce the quantity | 15 | `algo/engine.py::assess_box` — net weight ÷ that barcode's own registered per-noyau mass |
 | 3 | Register a new box, automatic timestamp | — | `backend/warehouse.py::create_box`, `t_in_sim` |
 | 4 | Track drying, ready / not ready at 24 h | 10 | `engine.required_cure_h` (fixed 24 h, contract 1.2) + the `sweep_cured` tick |
 | 5 | Classify and locate by type, quantity, storage date | 15 | `by_ref` panel + `slots` table + inventory `AGE` column |
@@ -74,13 +74,14 @@ could have the CAD tool poll the read-only `GET /api/slots` /
 `GET /api/state` to colour its own scene — nothing here should be built for
 that ahead of an actual request.
 
-**Criterion 10 needs a decision before the venue.** The innovation used to
-be an adaptive cure model (drying time extended by a cold/humid room). That
-model was removed in `docs/contracts.md` CONTRACT VERSION 1.2 — the CDC
-never asked for it, and the team's decision was a fixed 24 h for every box.
-Something else needs to fill this slot; see `docs/demo-script.md` beat 7
-for a placeholder built from what already exists (the FIFO rejected-list
-audit trail and the `/db` consistency checker), not a final answer.
+**Criterion 10** was an open placeholder for a while (the innovation used to
+be an adaptive cure model, removed in CONTRACT VERSION 1.2 — the CDC never
+asked for it). `docs/demo-script.md` beat 7 now carries two fully-built,
+demonstrable answers: the FIFO rejected-list audit trail with the `/db`
+consistency checker, and the barcode-first identification + overflow-storage
+design (CONTRACT VERSION 1.5) — a cured box that hasn't been picked up
+doesn't have to sit in the curing rack, freeing its slot for the next
+arrival without losing its FIFO position.
 
 The CDC's own sentence — *"the system must be able to say at any moment: which
 core type is present, how many, in which box, for how long, whether they are
@@ -114,9 +115,13 @@ literal answer to the brief. Do not let it get buried.
 
 Three rules hold the whole thing together:
 
-1. **The ESP32 is never told the answer.** It receives a beam bit and a
-   millivolt reading. It derives the count itself. That separation is what
-   makes criterion 9 defensible when a juror pushes on it.
+1. **The ESP32 is never told the answer.** It receives a raw millivolt
+   reading. It tares, waits for the mass to settle, and reports the reading
+   itself — identification (which reference, and that specific box's own
+   per-noyau weight) comes from a barcode scan upstream of the board, and
+   the resulting count is computed in `algo/engine.py`, not on the board.
+   That separation is what makes criterion 9 defensible when a juror pushes
+   on it.
 2. **No wall-clock timestamps, anywhere.** Everything is `t_sim` in seconds.
    One `datetime.now()` in the database and the 24-hour demo stops working.
 3. **All decisions live in `algo/engine.py`,** which imports nothing and does
@@ -277,10 +282,10 @@ they can't share an import, so nothing else keeps them in sync. `l0_probe.py`
 is the only one that proves the **live device path** — every other test/probe
 here runs with no device attached, so an arrival always resolves through the
 L1 backend fallback; `l0_probe.py` launches `fake_device.py` as the ESP32
-stand-in and checks that a nominal arrival and each anomaly (`off_by_one`,
-`delta`, `mislabel`, `sensor_dead`) resolve in mode `L0` with the right
-verdict, except `sensor_dead`, where L1 is the intended outcome (a real
-board with a dead beam sensor never sees an edge either).
+stand-in and checks that a nominal arrival and each anomaly (`none`,
+`mismatch`, `empty`) resolve in mode `L0` with the right verdict — weight is
+the only sensor now, so unlike the old beam-cross-check anomalies there is
+no case where L1 is the *correct* outcome any more.
 
 Run all six after every merge. Run them again at H23, before the feature
 freeze.

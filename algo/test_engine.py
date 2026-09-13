@@ -13,6 +13,7 @@ from algo import engine as E
 H = 3600.0
 ART = {"ref": "NY-114", "label": "Noyau culasse 114",
        "unit_mass_g": 206.0, "tolerance_g": 6.0, "box_capacity": 40}
+BARCODE = {"barcode_id": "BC-1", "ref": "NY-114", "unit_mass_g": 206.0}
 
 
 def _box(bid, ref, t_in, state, qty=40, req=24.0, **kw):
@@ -39,62 +40,53 @@ def test_is_cured_boundary():
 
 # --- criteria 2 + 3: identification and quantity -----------------------------
 
-def test_perfect_agreement_high_confidence():
+def test_weight_matching_barcode_is_accepted_high_confidence():
     gross = E.TARE_G + 37 * 206.0
-    r = E.assess_box(ART, 37, gross)
+    r = E.assess_box(BARCODE, ART, gross)
     assert r["quantity"] == 37 and r["confidence"] == "HAUTE" and r["accepted"]
 
 
-def test_off_by_one_accepted_but_cautious():
-    gross = E.TARE_G + 36 * 206.0
-    r = E.assess_box(ART, 37, gross)
-    assert r["accepted"] and r["confidence"] == "MOYENNE" and r["quantity"] == 36
-
-
-def test_delta_two_goes_to_quarantine():
-    gross = E.TARE_G + 35 * 206.0
-    r = E.assess_box(ART, 37, gross)
-    assert not r["accepted"] and r["state"] == "QUARANTINE"
-    # and it must be reported as a COUNTING fault, not a wrong reference
-    assert "ecart de comptage" in r["reason"]
-
-
-def test_mislabelled_box_is_caught_by_unit_mass():
-    # 37 cores that each weigh 260 g -> this is not NY-114 (206 g)
+def test_weight_mismatch_is_caught_by_unit_mass():
+    # The physical cores in this crate are NOT what its barcode promised --
+    # 37 cores that each weigh 260 g is not a clean multiple of 206 g.
     gross = E.TARE_G + 37 * 260.0
-    r = E.assess_box(ART, 37, gross)
+    r = E.assess_box(BARCODE, ART, gross)
     assert r["state"] == "QUARANTINE" and "incompatible" in r["reason"]
-    assert "multiple entier" in r["reason"]
+    assert not r["accepted"] and r["quantity"] == 0
 
 
-def test_dead_barrier_is_caught():
-    gross = E.TARE_G + 37 * 206.0
-    r = E.assess_box(ART, 0, gross)
-    assert r["state"] == "QUARANTINE"
+def test_empty_box_is_quarantined():
+    # scale reads only the tare weight -- no cores at all
+    gross = E.TARE_G
+    r = E.assess_box(BARCODE, ART, gross)
+    assert not r["accepted"] and r["state"] == "QUARANTINE"
+    assert r["quantity"] == 0
 
 
 def test_overloaded_crate_is_quarantined():
     # ART's box_capacity is 40 -- 45 matching cores would otherwise be a
-    # clean HAUTE-confidence accept (delta 0), but no real crate holds 45
-    # when it was built for 40.
+    # clean HAUTE-confidence accept, but no real crate holds 45 when it was
+    # built for 40.
     gross = E.TARE_G + 45 * 206.0
-    r = E.assess_box(ART, 45, gross)
+    r = E.assess_box(BARCODE, ART, gross)
     assert not r["accepted"] and r["state"] == "QUARANTINE"
     assert "capacite" in r["reason"] and "45" in r["reason"] and "40" in r["reason"]
 
 
 def test_exactly_at_capacity_is_accepted():
     gross = E.TARE_G + 40 * 206.0
-    r = E.assess_box(ART, 40, gross)
+    r = E.assess_box(BARCODE, ART, gross)
     assert r["accepted"] and r["quantity"] == 40
 
 
-def test_capacity_check_does_not_mask_a_counting_fault():
-    # delta >= 2 must still be reported as a counting fault, not relabelled
-    # as a capacity problem just because the raw beam count is also high.
-    gross = E.TARE_G + 41 * 206.0   # count_weight = 41, count_beam = 45 -> delta 4
-    r = E.assess_box(ART, 45, gross)
-    assert r["state"] == "QUARANTINE" and "ecart de comptage" in r["reason"]
+def test_each_barcode_carries_its_own_unit_mass():
+    # a slightly heavier batch, registered on ITS OWN barcode rather than
+    # the shared article average -- must count clean against that value,
+    # not articles.unit_mass_g.
+    heavier = {"barcode_id": "BC-2", "ref": "NY-114", "unit_mass_g": 210.0}
+    gross = E.TARE_G + 37 * 210.0
+    r = E.assess_box(heavier, ART, gross)
+    assert r["accepted"] and r["quantity"] == 37
 
 
 # --- criteria 5 + 6: FIFO and automatic proposal ------------------------------
@@ -256,9 +248,9 @@ def test_order_transitions():
 # --- arrival dedup (idempotency) ---------------------------------------------
 
 def test_dedup_open_window_resolves():
-    window = {"ref": "NY-114", "status": "OPEN", "resolved_at": None}
-    fp = E.box_fingerprint("NY-114", 37, 9420.5, "1.0")
-    v = E.dedup_verdict(window, fp, "NY-114", now_mono=100.0,
+    window = {"barcode_id": "BC-1", "status": "OPEN", "resolved_at": None}
+    fp = E.box_fingerprint("BC-1", 9420.5, "1.0")
+    v = E.dedup_verdict(window, fp, "BC-1", now_mono=100.0,
                         last_unsolicited=None, grace_s=15.0,
                         unsolicited_dedup_s=5.0)
     assert v["action"] == "resolve_window"
@@ -266,45 +258,45 @@ def test_dedup_open_window_resolves():
 
 def test_dedup_late_answer_after_l1_is_ignored():
     # L1 already fired and resolved the window 3 s ago; the real board
-    # answers late with the same ref -- must not create a second box.
-    window = {"ref": "NY-114", "status": "RESOLVED_L1", "resolved_at": 97.0}
-    fp = E.box_fingerprint("NY-114", 37, 9420.5, "1.0")
-    v = E.dedup_verdict(window, fp, "NY-114", now_mono=100.0,
+    # answers late with the same barcode -- must not create a second box.
+    window = {"barcode_id": "BC-1", "status": "RESOLVED_L1", "resolved_at": 97.0}
+    fp = E.box_fingerprint("BC-1", 9420.5, "1.0")
+    v = E.dedup_verdict(window, fp, "BC-1", now_mono=100.0,
                         last_unsolicited=None, grace_s=15.0,
                         unsolicited_dedup_s=5.0)
     assert v["action"] == "ignore"
 
 
 def test_dedup_late_answer_outside_grace_is_a_new_box():
-    window = {"ref": "NY-114", "status": "RESOLVED_L1", "resolved_at": 50.0}
-    fp = E.box_fingerprint("NY-114", 37, 9420.5, "1.0")
-    v = E.dedup_verdict(window, fp, "NY-114", now_mono=100.0,
+    window = {"barcode_id": "BC-1", "status": "RESOLVED_L1", "resolved_at": 50.0}
+    fp = E.box_fingerprint("BC-1", 9420.5, "1.0")
+    v = E.dedup_verdict(window, fp, "BC-1", now_mono=100.0,
                         last_unsolicited=None, grace_s=15.0,
                         unsolicited_dedup_s=5.0)
     assert v["action"] == "create"
 
 
 def test_dedup_unsolicited_repeat_is_ignored():
-    fp = E.box_fingerprint("NY-114", 37, 9420.5, "1.0")
+    fp = E.box_fingerprint("BC-1", 9420.5, "1.0")
     last = (fp, 98.0)
-    v = E.dedup_verdict(None, fp, "NY-114", now_mono=100.0,
+    v = E.dedup_verdict(None, fp, "BC-1", now_mono=100.0,
                         last_unsolicited=last, grace_s=15.0,
                         unsolicited_dedup_s=5.0)
     assert v["action"] == "ignore"
 
 
 def test_dedup_unsolicited_different_box_is_created():
-    fp1 = E.box_fingerprint("NY-114", 37, 9420.5, "1.0")
-    fp2 = E.box_fingerprint("NY-114", 40, 10200.0, "1.0")
-    v = E.dedup_verdict(None, fp2, "NY-114", now_mono=100.0,
+    fp1 = E.box_fingerprint("BC-1", 9420.5, "1.0")
+    fp2 = E.box_fingerprint("BC-1", 10200.0, "1.0")
+    v = E.dedup_verdict(None, fp2, "BC-1", now_mono=100.0,
                         last_unsolicited=(fp1, 99.0), grace_s=15.0,
                         unsolicited_dedup_s=5.0)
     assert v["action"] == "create"
 
 
 def test_dedup_no_window_no_history_is_created():
-    fp = E.box_fingerprint("NY-114", 37, 9420.5, "1.0")
-    v = E.dedup_verdict(None, fp, "NY-114", now_mono=100.0,
+    fp = E.box_fingerprint("BC-1", 9420.5, "1.0")
+    v = E.dedup_verdict(None, fp, "BC-1", now_mono=100.0,
                         last_unsolicited=None, grace_s=15.0,
                         unsolicited_dedup_s=5.0)
     assert v["action"] == "create"

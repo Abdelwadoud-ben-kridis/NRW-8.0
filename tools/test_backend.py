@@ -8,11 +8,12 @@ after each test), calls into backend/warehouse.py directly, and runs the
 consistency checker at the end to catch anything the specific assertions
 missed. This is what actually exercises the transactional guarantees the
 plan is built around (double-confirm, cancel-of-DONE, reservation expiry,
-FIFO dedup at the DB layer, unknown-ref quarantine, atomic reset) --
+FIFO dedup at the DB layer, unknown-barcode quarantine, atomic reset) --
 algo/test_engine.py only covers the pure decision functions in isolation.
 """
 from __future__ import annotations
 
+import itertools
 import os
 import sys
 import tempfile
@@ -27,6 +28,7 @@ from backend import warehouse as W
 H = 3600.0
 fails = []
 _paths: dict[int, str] = {}      # sqlite3.Connection has no __dict__ of its own
+_bc_seq = itertools.count(1)
 
 
 def fresh_con():
@@ -51,6 +53,15 @@ def cleanup(con):
                 pass
 
 
+def _bc(con, now_sim=0.0, ref="NY-114", unit_mass_g=206.0):
+    """Register a fresh, uniquely-named barcode (a worker's action, ahead of
+    any arrival) and return its id -- test convenience so each create_box
+    call below gets its own never-before-used barcode."""
+    barcode_id = "BC-%d" % next(_bc_seq)
+    W.register_barcode(con, now_sim, barcode_id, ref, unit_mass_g)
+    return barcode_id
+
+
 def check(name, cond, extra=""):
     print(("  ok   " if cond else "  FAIL ") + name + ("  " + str(extra) if extra else ""))
     if not cond:
@@ -68,7 +79,7 @@ def assert_pass(con, now_sim, label):
 def test_create_box_slots_both_sides():
     con = fresh_con()
     try:
-        res = W.create_box(con, 0.0, "NY-114", 37, C.TARE_G + 37 * 206.0, "test")
+        res = W.create_box(con, 0.0, _bc(con), C.TARE_G + 37 * 206.0, "test")
         check("box created DRYING", res["state"] == "DRYING", res)
         row = DB.one(con, "SELECT * FROM boxes WHERE box_id=?", (res["box_id"],))
         slot = DB.one(con, "SELECT * FROM slots WHERE slot_id=?", (row["slot_id"],))
@@ -79,16 +90,33 @@ def test_create_box_slots_both_sides():
         cleanup(con)
 
 
-def test_unknown_ref_quarantines_with_null_article():
+def test_unknown_barcode_quarantines_with_null_article():
     con = fresh_con()
     try:
-        res = W.create_box(con, 0.0, "NOPE-1", 10, 2000.0, "test")
-        check("unknown ref quarantined", res["state"] == "QUARANTINE")
+        res = W.create_box(con, 0.0, "BC-NEVER-REGISTERED", 2000.0, "test")
+        check("unknown barcode quarantined", res["state"] == "QUARANTINE")
         row = DB.one(con, "SELECT * FROM boxes WHERE box_id=?", (res["box_id"],))
         check("article_ref is NULL (not misfiled)", row["article_ref"] is None)
         check("does not pollute NY-114", not any(
             b["article_ref"] == "NY-114" for b in DB.rows(con, "SELECT * FROM boxes")))
-        assert_pass(con, 0.0, "unknown-ref quarantine")
+        assert_pass(con, 0.0, "unknown-barcode quarantine")
+    finally:
+        cleanup(con)
+
+
+def test_reused_barcode_is_quarantined():
+    con = fresh_con()
+    try:
+        barcode_id = _bc(con)
+        first = W.create_box(con, 0.0, barcode_id, C.TARE_G + 10 * 206.0, "test")
+        check("first scan of the barcode accepted", first["state"] == "DRYING")
+        second = W.create_box(con, 1.0, barcode_id, C.TARE_G + 10 * 206.0, "test")
+        check("replaying the same barcode is quarantined",
+             second["state"] == "QUARANTINE")
+        check("first box is untouched",
+             DB.one(con, "SELECT state FROM boxes WHERE box_id=?",
+                   (first["box_id"],))["state"] == "DRYING")
+        assert_pass(con, 1.0, "reused-barcode quarantine")
     finally:
         cleanup(con)
 
@@ -96,7 +124,7 @@ def test_unknown_ref_quarantines_with_null_article():
 def test_double_confirm_deducts_once():
     con = fresh_con()
     try:
-        W.create_box(con, 0.0, "NY-114", 40, C.TARE_G + 40 * 206.0, "test")
+        W.create_box(con, 0.0, _bc(con), C.TARE_G + 40 * 206.0, "test")
         DB.update(con, "boxes", "box_id", "BOX-1", {"state": "READY"})
         plan = W.reserve(con, 100 * H, "NY-114", 10)
         oid = plan["order_id"]
@@ -117,7 +145,7 @@ def test_double_confirm_deducts_once():
 def test_confirm_cancelled_order_refused():
     con = fresh_con()
     try:
-        W.create_box(con, 0.0, "NY-114", 40, C.TARE_G + 40 * 206.0, "test")
+        W.create_box(con, 0.0, _bc(con), C.TARE_G + 40 * 206.0, "test")
         DB.update(con, "boxes", "box_id", "BOX-1", {"state": "READY"})
         plan = W.reserve(con, 100 * H, "NY-114", 10)
         oid = plan["order_id"]
@@ -137,7 +165,7 @@ def test_confirm_cancelled_order_refused():
 def test_cancel_done_order_refused_and_box_stays_empty():
     con = fresh_con()
     try:
-        W.create_box(con, 0.0, "NY-114", 10, C.TARE_G + 10 * 206.0, "test")
+        W.create_box(con, 0.0, _bc(con), C.TARE_G + 10 * 206.0, "test")
         DB.update(con, "boxes", "box_id", "BOX-1", {"state": "READY"})
         plan = W.reserve(con, 100 * H, "NY-114", 10)
         oid = plan["order_id"]
@@ -159,7 +187,7 @@ def test_cancel_done_order_refused_and_box_stays_empty():
 def test_reservation_expiry_cancels_order_and_releases_box():
     con = fresh_con()
     try:
-        W.create_box(con, 0.0, "NY-114", 40, C.TARE_G + 40 * 206.0, "test")
+        W.create_box(con, 0.0, _bc(con), C.TARE_G + 40 * 206.0, "test")
         DB.update(con, "boxes", "box_id", "BOX-1", {"state": "READY"})
         plan = W.reserve(con, 100 * H, "NY-114", 10)
         oid = plan["order_id"]
@@ -187,7 +215,7 @@ def test_whole_box_pick_overshoots_and_empties_the_box():
     # 30 cores stranded in a half-picked crate.
     con = fresh_con()
     try:
-        W.create_box(con, 0.0, "NY-114", 40, C.TARE_G + 40 * 206.0, "test")
+        W.create_box(con, 0.0, _bc(con), C.TARE_G + 40 * 206.0, "test")
         DB.update(con, "boxes", "box_id", "BOX-1", {"state": "READY"})
         plan = W.reserve(con, 100 * H, "NY-114", 10)
         check("rounds up to the whole box (40, not 10)", plan["qty_allocated"] == 40)
@@ -205,7 +233,7 @@ def test_insufficient_stock_reserves_nothing():
     # reservation instead of locking those 5 and reporting a shortfall.
     con = fresh_con()
     try:
-        W.create_box(con, 0.0, "NY-114", 5, C.TARE_G + 5 * 206.0, "test")
+        W.create_box(con, 0.0, _bc(con), C.TARE_G + 5 * 206.0, "test")
         DB.update(con, "boxes", "box_id", "BOX-1", {"state": "READY"})
         plan = W.reserve(con, 100 * H, "NY-114", 40)
         check("order is IMPOSSIBLE", plan["status"] == "IMPOSSIBLE")
@@ -221,7 +249,7 @@ def test_insufficient_stock_reserves_nothing():
 def test_double_allocation_is_impossible():
     con = fresh_con()
     try:
-        W.create_box(con, 0.0, "NY-114", 20, C.TARE_G + 20 * 206.0, "test")
+        W.create_box(con, 0.0, _bc(con), C.TARE_G + 20 * 206.0, "test")
         DB.update(con, "boxes", "box_id", "BOX-1", {"state": "READY"})
         plan_a = W.reserve(con, 100 * H, "NY-114", 20)
         plan_b = W.reserve(con, 100 * H, "NY-114", 20)
@@ -238,10 +266,11 @@ def test_double_allocation_is_impossible():
 def test_reset_is_atomic_and_checks_pass():
     con = fresh_con()
     try:
-        W.create_box(con, 0.0, "NY-114", 10, C.TARE_G + 10 * 206.0, "test")
+        W.create_box(con, 0.0, _bc(con), C.TARE_G + 10 * 206.0, "test")
         W.reset_all(con, keep_articles=False)
         check("boxes wiped", con.execute("SELECT COUNT(*) FROM boxes").fetchone()[0] == 0)
-        check("slots rebuilt", con.execute("SELECT COUNT(*) FROM slots").fetchone()[0] == C.SLOT_COUNT)
+        check("slots rebuilt", con.execute("SELECT COUNT(*) FROM slots").fetchone()[0]
+             == C.SLOT_COUNT + C.STORAGE_SLOTS)
         check("meta checkpoint reset",
              float(DB.meta_get(con, "t_sim")) == C.CLOCK_START_SIM)
         assert_pass(con, 0.0, "reset")
@@ -258,6 +287,17 @@ def test_reset_keep_articles():
         check("kept the extra reference", "NY-999" in refs)
         check("boxes still wiped", con.execute("SELECT COUNT(*) FROM boxes").fetchone()[0] == 0)
         assert_pass(con, 0.0, "reset keep_articles")
+    finally:
+        cleanup(con)
+
+
+def test_reset_wipes_barcodes():
+    con = fresh_con()
+    try:
+        _bc(con)
+        W.reset_all(con, keep_articles=False)
+        check("barcodes wiped",
+             con.execute("SELECT COUNT(*) FROM barcodes").fetchone()[0] == 0)
     finally:
         cleanup(con)
 
@@ -290,7 +330,7 @@ def test_clock_checkpoint_restore():
 def test_apply_pick_invalid_take_rolls_back_confirm():
     con = fresh_con()
     try:
-        W.create_box(con, 0.0, "NY-114", 10, C.TARE_G + 10 * 206.0, "test")
+        W.create_box(con, 0.0, _bc(con), C.TARE_G + 10 * 206.0, "test")
         DB.update(con, "boxes", "box_id", "BOX-1", {"state": "READY"})
         plan = W.reserve(con, 100 * H, "NY-114", 10)
         # tamper with the payload to request more than is actually available
@@ -310,6 +350,107 @@ def test_apply_pick_invalid_take_rolls_back_confirm():
         check("box qty untouched by the rolled-back confirm", row["qty_available"] == 10)
         order_row = DB.one(con, "SELECT * FROM orders WHERE order_id=?", (plan["order_id"],))
         check("order still PENDING (not half-confirmed)", order_row["status"] == "PENDING")
+    finally:
+        cleanup(con)
+
+
+def test_relocate_moves_ready_box_to_storage_and_frees_curing_slot():
+    con = fresh_con()
+    try:
+        res = W.create_box(con, 0.0, _bc(con), C.TARE_G + 10 * 206.0, "test")
+        box_id = res["box_id"]
+        curing_slot = res["slot"]["slot_id"]
+        DB.update(con, "boxes", "box_id", box_id, {"state": "READY"})
+
+        moved = W.relocate(con, 100 * H, box_id)
+        check("relocate reports the storage destination",
+             moved["to_slot"].startswith("STORAGE-"), moved)
+
+        row = DB.one(con, "SELECT * FROM boxes WHERE box_id=?", (box_id,))
+        check("box kept READY", row["state"] == "READY")
+        check("box now sits in the storage slot", row["slot_id"] == moved["to_slot"])
+        old_slot = DB.one(con, "SELECT * FROM slots WHERE slot_id=?", (curing_slot,))
+        check("old curing slot freed", old_slot["occupied_by"] is None)
+        new_slot = DB.one(con, "SELECT * FROM slots WHERE slot_id=?", (moved["to_slot"],))
+        check("new storage slot occupied by this box", new_slot["occupied_by"] == box_id)
+        check("new slot really is zone STORAGE", new_slot["zone"] == "STORAGE")
+        assert_pass(con, 100 * H, "relocate")
+    finally:
+        cleanup(con)
+
+
+def test_relocate_refuses_a_box_that_is_not_ready():
+    con = fresh_con()
+    try:
+        res = W.create_box(con, 0.0, _bc(con), C.TARE_G + 10 * 206.0, "test")
+        try:
+            W.relocate(con, 0.0, res["box_id"])
+            check("relocating a DRYING box raises", False)
+        except W.OpError:
+            check("relocating a DRYING box raises", True)
+        row = DB.one(con, "SELECT * FROM boxes WHERE box_id=?", (res["box_id"],))
+        check("box untouched by the refused relocate", row["state"] == "DRYING")
+    finally:
+        cleanup(con)
+
+
+def test_relocate_refuses_a_box_already_in_storage():
+    con = fresh_con()
+    try:
+        res = W.create_box(con, 0.0, _bc(con), C.TARE_G + 10 * 206.0, "test")
+        DB.update(con, "boxes", "box_id", res["box_id"], {"state": "READY"})
+        W.relocate(con, 100 * H, res["box_id"])
+        try:
+            W.relocate(con, 100 * H, res["box_id"])
+            check("relocating an already-stored box raises", False)
+        except W.OpError:
+            check("relocating an already-stored box raises", True)
+        assert_pass(con, 100 * H, "double relocate refusal")
+    finally:
+        cleanup(con)
+
+
+def test_relocated_box_keeps_fifo_position_and_stays_pickable():
+    con = fresh_con()
+    try:
+        W.create_box(con, 0.0, _bc(con), C.TARE_G + 40 * 206.0, "test")
+        DB.update(con, "boxes", "box_id", "BOX-1", {"state": "READY"})
+        W.relocate(con, 100 * H, "BOX-1")
+        plan = W.reserve(con, 100 * H, "NY-114", 40)
+        check("FIFO still picks the relocated box", plan["picks"]
+             and plan["picks"][0]["box_id"] == "BOX-1", plan)
+        assert_pass(con, 100 * H, "reserve after relocate")
+    finally:
+        cleanup(con)
+
+
+def test_register_barcode_rejects_duplicate_and_unknown_ref():
+    con = fresh_con()
+    try:
+        barcode_id = _bc(con)
+        try:
+            W.register_barcode(con, 0.0, barcode_id, "NY-114", 206.0)
+            check("registering a duplicate barcode_id raises", False)
+        except W.OpError as e:
+            check("registering a duplicate barcode_id raises", e.code == 409)
+        try:
+            W.register_barcode(con, 0.0, "BC-NEW", "NOPE", 206.0)
+            check("registering against an unknown ref raises", False)
+        except W.OpError as e:
+            check("registering against an unknown ref raises", e.code == 400)
+    finally:
+        cleanup(con)
+
+
+def test_barcode_carries_its_own_unit_mass_not_the_articles_average():
+    # a heavier batch, registered on its own barcode -- must count clean
+    # against ITS weight, not the shared article's 206.0 g average.
+    con = fresh_con()
+    try:
+        barcode_id = _bc(con, unit_mass_g=210.0)
+        res = W.create_box(con, 0.0, barcode_id, C.TARE_G + 37 * 210.0, "test")
+        check("counts clean against the barcode's own unit mass",
+             res["state"] == "DRYING" and res["quantity"] == 37, res)
     finally:
         cleanup(con)
 

@@ -77,12 +77,14 @@ def restore_clock(con) -> tuple[float, float]:
 # ---------------------------------------------------------------------------
 
 def _occupy_a_slot(con, box_id: str) -> dict | None:
-    """Pick the best free slot and CAS-occupy it. Retries a few times if the
-    CAS loses a race (single-connection design makes that vanishingly rare,
-    but the retry costs nothing and makes the guarantee real, not assumed)."""
+    """Pick the best free CURING-rack slot and CAS-occupy it. Retries a few
+    times if the CAS loses a race (single-connection design makes that
+    vanishingly rare, but the retry costs nothing and makes the guarantee
+    real, not assumed). Never hands out a STORAGE slot -- a box is only ever
+    born into the curing rack; it can move to STORAGE later via relocate()."""
     for _ in range(4):
         free = DB.rows(con, "SELECT * FROM slots WHERE occupied_by IS NULL "
-                            "AND reserved_for IS NULL")
+                            "AND reserved_for IS NULL AND zone='CURING'")
         slot = E.choose_slot(free, "")
         if slot is None:
             return None
@@ -94,21 +96,37 @@ def _occupy_a_slot(con, box_id: str) -> dict | None:
     return None
 
 
+def _occupy_a_storage_slot(con, box_id: str) -> dict | None:
+    """Same CAS-retry pattern as _occupy_a_slot, but from the flat STORAGE
+    pool -- there is no rack position to rank, so the first free row wins."""
+    for _ in range(4):
+        free = DB.rows(con, "SELECT * FROM slots WHERE occupied_by IS NULL "
+                            "AND reserved_for IS NULL AND zone='STORAGE'")
+        if not free:
+            return None
+        slot = free[0]
+        n = DB.cas_update(con, "slots", "slot_id", slot["slot_id"],
+                          expect={"occupied_by": None}, patch={"occupied_by": box_id})
+        if n == 1:
+            return slot
+    return None
+
+
 def _insert_box_row(con, now_sim: float, box_id: str, article_ref: str | None,
-                    qty: int, state: str, count_beam: int, count_weight: int,
+                    qty: int, state: str, count_weight: int,
                     gross_g: float, confidence: str, reason: str | None,
-                    slot: dict | None) -> None:
+                    slot: dict | None, code: str) -> None:
     req_h = E.required_cure_h()
     con.execute(
         "INSERT INTO boxes(box_id,article_ref,qty_initial,qty_available,slot_id,"
         "state,t_in_sim,required_cure_h,ready_at_sim,count_beam,count_weight,"
-        "gross_g,confidence,reason) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "gross_g,confidence,reason,code) VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?,?)",
         (box_id, article_ref, qty, qty, slot["slot_id"] if slot else None, state,
-         now_sim, req_h, now_sim + req_h * 3600.0, count_beam, count_weight,
-         gross_g, confidence, reason))
+         now_sim, req_h, now_sim + req_h * 3600.0, count_weight,
+         gross_g, confidence, reason, code))
 
 
-def create_box(con, now_sim: float, ref: str, count_beam: int, gross_g: float,
+def create_box(con, now_sim: float, barcode_id: str, gross_g: float,
                source: str, t_c: float | None = None, rh: float | None = None,
                fw: str | None = None) -> dict:
     """Create exactly one box from one arrival's evidence.
@@ -116,27 +134,44 @@ def create_box(con, now_sim: float, ref: str, count_beam: int, gross_g: float,
     Called only after the caller (backend/main.py) has already decided this
     message should produce a box -- deduplication is main.py's job (it owns
     the monotonic clock and the arrival window; see algo.engine.dedup_verdict
-    and docs/contracts.md CONTRACT VERSION 1.2 §1.3), not this function's.
+    and docs/contracts.md CONTRACT VERSION 1.4 §1.3), not this function's.
 
-    An unknown `ref` is quarantined with `article_ref = NULL` (contract
-    1.2 -- it no longer misfiles under a fallback article), qty 0, no slot.
+    Identification is a lookup, not a guess: `barcode_id` was scanned off
+    the physical crate by the conveyor's scanner, and a worker registered it
+    (register_barcode) well before this box ever arrived. Two things
+    quarantine the box before assess_box ever runs, because neither is a
+    counting question:
+      - the barcode was never registered ("code-barre inconnu")
+      - the barcode was already consumed by an earlier box ("deja utilise")
     """
     with DB.transaction(con):
-        art = DB.one(con, "SELECT * FROM articles WHERE ref=?", (ref,))
+        bc = DB.one(con, "SELECT * FROM barcodes WHERE barcode_id=?", (barcode_id,))
         box_id = DB.next_id(con, "boxes", "box_id", "BOX")
-        evidence = {"count_beam": int(count_beam), "gross_g": round(float(gross_g), 1),
+        evidence = {"gross_g": round(float(gross_g), 1),
                     "t_c": t_c, "rh": rh, "fw": fw, "source": source}
 
-        if art is None:
-            reason = "reference inconnue: %s" % ref
+        if bc is None:
+            reason = "code-barre inconnu: %s" % barcode_id
             _insert_box_row(con, now_sim, box_id, None, 0, "QUARANTINE",
-                            int(count_beam), 0, gross_g, "NULLE", reason, None)
+                            0, gross_g, "NULLE", reason, None, barcode_id)
             DB.log_event(con, now_sim, "quarantine", {
-                "box_id": box_id, "declared_ref": ref,
-                "reason": "reference inconnue", **evidence})
-            return {"box_id": box_id, "state": "QUARANTINE", "reason": reason}
+                "box_id": box_id, "barcode_id": barcode_id,
+                "reason": "code-barre inconnu", **evidence})
+            return {"box_id": box_id, "state": "QUARANTINE", "reason": reason,
+                   "code": barcode_id}
 
-        verdict = E.assess_box(art, count_beam, gross_g)
+        if bc["used_by_box"]:
+            reason = "code-barre deja utilise par %s" % bc["used_by_box"]
+            _insert_box_row(con, now_sim, box_id, bc["ref"], 0, "QUARANTINE",
+                            0, gross_g, "NULLE", reason, None, barcode_id)
+            DB.log_event(con, now_sim, "quarantine", {
+                "box_id": box_id, "barcode_id": barcode_id, "ref": bc["ref"],
+                "reason": "code-barre deja utilise", **evidence})
+            return {"box_id": box_id, "state": "QUARANTINE", "reason": reason,
+                   "code": barcode_id}
+
+        art = DB.one(con, "SELECT * FROM articles WHERE ref=?", (bc["ref"],))
+        verdict = E.assess_box(bc, art, gross_g)
         slot = None
         if verdict["accepted"]:
             slot = _occupy_a_slot(con, box_id)
@@ -147,15 +182,21 @@ def create_box(con, now_sim: float, ref: str, count_beam: int, gross_g: float,
             state, reason = "QUARANTINE", "aucun emplacement libre"
 
         qty = verdict["quantity"] if state != "QUARANTINE" else 0
-        _insert_box_row(con, now_sim, box_id, ref, qty, state,
-                        verdict["count_beam"], verdict["count_weight"], gross_g,
-                        verdict["confidence"], reason, slot)
+        _insert_box_row(con, now_sim, box_id, bc["ref"], qty, state,
+                        verdict["count_weight"], gross_g,
+                        verdict["confidence"], reason, slot, barcode_id)
+
+        # Consumed the instant it's scanned, accepted or not -- a sticker
+        # that already went through the conveyor once can never be replayed
+        # onto a second physical box.
+        DB.cas_update(con, "barcodes", "barcode_id", barcode_id,
+                      expect={"used_by_box": None}, patch={"used_by_box": box_id})
 
         kind = "quarantine" if state == "QUARANTINE" else "box_in"
         DB.log_event(con, now_sim, kind, {
-            "box_id": box_id, "ref": ref, "qty": qty,
+            "box_id": box_id, "ref": bc["ref"], "qty": qty, "barcode_id": barcode_id,
             "slot": slot["slot_id"] if slot else None, "state": state,
-            "confidence": verdict["confidence"], "delta": verdict["delta"],
+            "confidence": verdict["confidence"],
             "reason": reason, "required_cure_h": round(E.required_cure_h(), 1),
             **evidence})
         DB.meta_set(con, "t_sim", now_sim)
@@ -165,9 +206,67 @@ def create_box(con, now_sim: float, ref: str, count_beam: int, gross_g: float,
         # overrides an accepted verdict into QUARANTINE) -- they must win
         # over verdict's own "state"/"reason" keys, so they are applied
         # AFTER spreading verdict, not before.
-        return {"box_id": box_id, "slot": slot,
+        return {"box_id": box_id, "slot": slot, "code": barcode_id,
                **{k: v for k, v in verdict.items() if k not in ("state", "reason")},
                "state": state, "reason": reason}
+
+
+# ---------------------------------------------------------------------------
+# Relocate a cured box out of the curing rack into overflow storage
+# (POST /api/box/{id}/relocate)
+# ---------------------------------------------------------------------------
+
+def relocate(con, now_sim: float, box_id: str) -> dict:
+    """CDC's second outcome for a cured box: production hasn't asked for it,
+    so it moves out of the curing rack into a separate storage pool, freeing
+    its curing slot for a new arrival. The box keeps its state (READY), its
+    cure record and its FIFO position (t_in_sim untouched) -- only its
+    physical location changes, so it stays fully eligible for a future pick.
+    """
+    with DB.transaction(con):
+        sweep_cured(con, now_sim)
+        b = DB.one(con, "SELECT * FROM boxes WHERE box_id=?", (box_id,))
+        if not b:
+            raise OpError("unknown box: %s" % box_id, code=404)
+        if b["state"] != "READY":
+            raise OpError("box %s is %s, must be READY to relocate to storage"
+                          % (box_id, b["state"]), code=409)
+
+        cur_slot = DB.one(con, "SELECT * FROM slots WHERE slot_id=?", (b["slot_id"],)) \
+            if b["slot_id"] else None
+        if cur_slot and cur_slot["zone"] == "STORAGE":
+            raise OpError("box %s is already in storage" % box_id, code=409)
+
+        # Free the CURING slot BEFORE claiming a STORAGE one -- uq_slots_occupied
+        # (one slot per box_id) rejects a box_id that would momentarily occupy
+        # two slots at once. If claiming the new slot then fails, this release
+        # rolls back with everything else in the transaction (db.transaction
+        # catches every exception, OpError included), so the box never ends
+        # up truly slotless.
+        if b["slot_id"]:
+            n = DB.cas_update(con, "slots", "slot_id", b["slot_id"],
+                              expect={"occupied_by": box_id}, patch={"occupied_by": None})
+            if n != 1:
+                raise OpError("internal: box %s's slot changed mid-relocate" % box_id,
+                              code=409)
+
+        new_slot = _occupy_a_storage_slot(con, box_id)
+        if new_slot is None:
+            raise OpError("aucun emplacement de stockage libre", code=409)
+
+        n = DB.cas_update(con, "boxes", "box_id", box_id,
+                          expect={"state": "READY"},
+                          patch={"slot_id": new_slot["slot_id"]})
+        if n != 1:
+            raise OpError("internal: box %s changed state mid-relocate" % box_id,
+                          code=409)
+
+        DB.log_event(con, now_sim, "box_relocated", {
+            "box_id": box_id, "ref": b["article_ref"],
+            "from_slot": b["slot_id"], "to_slot": new_slot["slot_id"]})
+        DB.meta_set(con, "t_sim", now_sim)
+        return {"box_id": box_id, "from_slot": b["slot_id"],
+               "to_slot": new_slot["slot_id"]}
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +498,37 @@ def register_article(con, now_sim: float, **kwargs) -> dict:
     return art
 
 
+def register_barcode(con, now_sim: float, barcode_id: str, ref: str,
+                     unit_mass_g: float) -> dict:
+    """A worker's action, well before any conveyor run: label a physical box
+    with `barcode_id`, declaring which reference it holds and that specific
+    box's own measured per-noyau weight (batches vary slightly even within
+    one reference, which is why this isn't just `articles.unit_mass_g`).
+
+    This is the ONLY place a box's identity/weight is ever declared by a
+    human. From here on, the conveyor's scanner (backend/warehouse.py::
+    create_box) reads `barcode_id` back and looks up exactly what was
+    registered here -- nobody re-types or re-counts anything at arrival.
+    """
+    barcode_id = (barcode_id or "").strip()
+    ref = (ref or "").strip()
+    if not barcode_id or not ref:
+        raise OpError("barcode_id et ref sont obligatoires", code=400)
+    if unit_mass_g is None or unit_mass_g <= 0:
+        raise OpError("masse par noyau doit etre > 0", code=400)
+    with DB.transaction(con):
+        if DB.one(con, "SELECT 1 FROM barcodes WHERE barcode_id=?", (barcode_id,)):
+            raise OpError("code-barre deja enregistre: %s" % barcode_id, code=409)
+        if not DB.one(con, "SELECT 1 FROM articles WHERE ref=?", (ref,)):
+            raise OpError("reference inconnue: %s" % ref, code=400)
+        con.execute(
+            "INSERT INTO barcodes(barcode_id,ref,unit_mass_g,registered_sim) "
+            "VALUES (?,?,?,?)", (barcode_id, ref, float(unit_mass_g), now_sim))
+        DB.log_event(con, now_sim, "barcode_registered", {
+            "barcode_id": barcode_id, "ref": ref, "unit_mass_g": float(unit_mass_g)})
+        return {"barcode_id": barcode_id, "ref": ref, "unit_mass_g": float(unit_mass_g)}
+
+
 # ---------------------------------------------------------------------------
 # Reset / scenario
 # ---------------------------------------------------------------------------
@@ -429,19 +559,25 @@ def load_demo_scenario(con) -> dict:
     """
     with DB.transaction(con):
         DB.seed(con)
-        for ref, qty, at_h in _SCENARIO_PLAN:
+        for i, (ref, qty, at_h) in enumerate(_SCENARIO_PLAN, start=1):
             t_in = at_h * 3600.0
             art = DB.one(con, "SELECT * FROM articles WHERE ref=?", (ref,))
             box_id = DB.next_id(con, "boxes", "box_id", "BOX")
+            barcode_id = "BC-DEMO-%d" % i
             gross = C.TARE_G + qty * art["unit_mass_g"]
             slot = _occupy_a_slot(con, box_id)
+            con.execute(
+                "INSERT INTO barcodes(barcode_id,ref,unit_mass_g,registered_sim,"
+                "used_by_box) VALUES (?,?,?,?,?)",
+                (barcode_id, ref, art["unit_mass_g"], t_in, box_id))
             _insert_box_row(con, t_in, box_id, ref, qty, "DRYING" if slot else "QUARANTINE",
-                            qty, qty, gross, "HAUTE",
-                            None if slot else "aucun emplacement libre", slot)
+                            qty, gross, "HAUTE",
+                            None if slot else "aucun emplacement libre", slot,
+                            barcode_id)
             DB.log_event(con, t_in, "box_in", {
-                "box_id": box_id, "ref": ref, "qty": qty,
+                "box_id": box_id, "ref": ref, "qty": qty, "barcode_id": barcode_id,
                 "slot": slot["slot_id"] if slot else None, "state": "DRYING",
-                "confidence": "HAUTE", "delta": 0, "source": "scenario",
+                "confidence": "HAUTE", "source": "scenario",
                 "required_cure_h": round(E.required_cure_h(), 1)})
         # advance straight to the demo instant: 3 of the 6 boxes are cured
         # by 34 h (24 h floor from t_in <= 10h), 3 are still drying

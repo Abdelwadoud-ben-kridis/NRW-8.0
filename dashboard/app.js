@@ -43,6 +43,24 @@ let refAvail = {};        // ref -> total READY cores, refreshed every snapshot 
 
 const hk = (k) => ` <span class="hk">${k}</span>`;
 
+// A worker sticks this on the physical crate before it reaches the scale
+// (CDC step 1, "identifier le noyau") -- backend/warehouse.py::_gen_code
+// generates the payload; this is purely a rendering of that string as bars,
+// nothing here is scanned back or feeds a decision.
+function barcodeSvg(code) {
+  const chars = String(code || "").split("");
+  const w = 84, h = 20;
+  let x = 1, bars = "";
+  for (const ch of chars) {
+    const bw = 1 + (ch.charCodeAt(0) % 3);
+    if (x + bw > w - 1) break;
+    bars += `<rect x="${x}" y="1" width="${bw}" height="${h - 2}"/>`;
+    x += bw + 1;
+  }
+  return `<svg class="barcode" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" ` +
+    `role="img" aria-label="${code || ""}">${bars}</svg>`;
+}
+
 // ---------------------------------------------------------------------------
 // static text from labels.js — nothing is hard-coded in index.html
 // ---------------------------------------------------------------------------
@@ -53,10 +71,16 @@ function paintLabels() {
   $("btn-lang").title = L.lang === "EN" ? "Français" : "English";
   $("btn-sim").title = L.simControls;
   $("btn-shortcuts").title = L.shortcuts;
-  $("contract-chip").textContent = `${L.contract} 1.4`;
+  $("contract-chip").textContent = `${L.contract} 1.5`;
   $("db-health").title = L.database;
 
   $("h-plant").textContent = L.plant;
+  $("h-barcode").textContent = L.barcodeSection;
+  $("bc-notice").textContent = L.barcodeNotice;
+  $("l-bcid").textContent = L.bcId;
+  $("l-bcmass").textContent = L.bcMass;
+  $("btn-bc-register").textContent = L.bcRegister;
+  $("l-bcpick").textContent = L.bcPick;
   $("l-art").textContent = L.article;
   $("l-qty").textContent = L.qty;
   $("l-ano").textContent = L.anomaly;
@@ -135,6 +159,7 @@ function paintLabels() {
 
 const INV_COLS = [
   { key: "box_id", label: () => L.box },
+  { key: "code", label: () => L.code },
   { key: "ref", label: () => L.ref },
   { key: "label", label: () => L.label2 },
   { key: "qty_initial", label: () => L.qty, num: true },
@@ -153,8 +178,10 @@ function paintInvHead() {
     if (c.num) cls.push("num");
     if (invSort.key === c.key) cls.push(invSort.dir > 0 ? "sort-asc" : "sort-desc");
     return `<th data-key="${c.key}" class="${cls.join(" ")}">${c.label()}</th>`;
-  }).join("") + "</tr>";
-  $("invt").tHead.querySelectorAll("th").forEach((th) => {
+  }).join("") + `<th class="actions">${L.actions}</th></tr>`;
+  // the trailing Actions column has no data-key -- it is not sortable, so it
+  // must not be wired into the click-to-sort handler below
+  $("invt").tHead.querySelectorAll("th[data-key]").forEach((th) => {
     th.onclick = () => {
       const k = th.dataset.key;
       if (invSort.key === k) invSort.dir *= -1;
@@ -194,8 +221,12 @@ const tDet = (s) => {
   if (L.det && L.det[s]) return L.det[s];
   let m = /^pret dans ([\d.]+) h$/.exec(s);
   if (m) return L.detReadyIn(m[1]);
-  m = /^ecart de comptage = (\d+) \(barriere (\d+) \/ pesee (\d+)\)$/.exec(s);
-  if (m) return L.detDelta(m[1], m[2], m[3]);
+  m = /^masse nette ([\d.]+) g incompatible avec le code-barre (\S+) \(([\d.]+) g\/noyau attendu, ecart ([\d.]+) g\)$/.exec(s);
+  if (m) return L.detMismatch(m[1], m[2], m[3], m[4]);
+  m = /^code-barre inconnu: (.+)$/.exec(s);
+  if (m) return L.detUnknownBarcode(m[1]);
+  m = /^code-barre deja utilise par (.+)$/.exec(s);
+  if (m) return L.detReusedBarcode(m[1]);
   m = /^quantite (\d+) superieure a la capacite de la caisse \((\d+)\)$/.exec(s);
   if (m) return L.detOverCapacity(m[1], m[2]);
   return s;
@@ -368,9 +399,10 @@ function render(st) {
   $("p-dev").className = "pill " + (st.device.online ? "on" : "off");
   $("p-dev").textContent = `${L.device} ${st.device.online ? L.online : L.offline}`;
 
-  // --- KPI ribbon: six tiles, each with its unit spelled out ---
+  // --- KPI ribbon: each tile with its unit spelled out ---
   const k = st.kpi;
   const pct = k.slots_total ? (k.slots_used / k.slots_total) * 100 : 0;
+  const storagePct = k.storage_total ? (k.storage_used / k.storage_total) * 100 : 0;
   $("kpi-ribbon").innerHTML = [
     `<div class="kpi-tile acc"><div class="v">${k.slots_total}</div><div class="k">${L.lang === "EN" ? "Total slots" : "Emplacements totaux"}</div></div>`,
     `<div class="kpi-tile acc"><div class="v">${k.slots_used}<small> / ${k.slots_total}</small></div>
@@ -380,6 +412,9 @@ function render(st) {
     `<div class="kpi-tile warn"><div class="v">${k.boxes_drying}</div><div class="k">${L.kpiDrying}</div></div>`,
     `<div class="kpi-tile bad${k.boxes_quarantine ? "" : " zero"}"><div class="v">${k.boxes_quarantine}</div><div class="k">${L.kpiQuar}</div></div>`,
     `<div class="kpi-tile ok"><div class="v">${k.cores_available}</div><div class="k">${L.kpiCores}</div></div>`,
+    `<div class="kpi-tile acc"><div class="v">${k.storage_used}<small> / ${k.storage_total}</small></div>
+       <div class="k">${L.kpiStorage}</div>
+       <div class="bar" style="margin-top:6px"><i style="width:${storagePct}%"></i></div></div>`,
   ].join("");
 
   // --- live operation stage ---
@@ -431,7 +466,10 @@ function render(st) {
   $("crane-body").innerHTML = cr.cmd === "idle" || !cr.box_id
     ? `<div class="crane-empty">${L.craneNoCmd}</div>`
     : `<div class="crane-line">
-         <span class="crane-cmd ${cr.cmd}">${cr.cmd === "store" ? L.craneStore : L.cranePick}</span>
+         <span class="crane-cmd ${cr.cmd}">${
+           cr.cmd === "store" ? L.craneStore
+           : cr.cmd === "relocate" ? L.craneRelocate
+           : L.cranePick}</span>
          <span>${cr.box_id}</span>
          <span class="crane-arrow">→</span>
          <span>${cr.slot_id || "—"}</span>
@@ -443,13 +481,13 @@ function render(st) {
   $("quar-cnt").textContent = quar.length || "";
   if (quar.length) {
     $("quar-list").innerHTML = quar.map((b) => {
-      const m = /^ecart de comptage = (\d+) \(barriere (\d+) \/ pesee (\d+)\)$/.exec(b.reason || "");
+      const m = /^masse nette ([\d.]+) g incompatible avec le code-barre (\S+) \(([\d.]+) g\/noyau attendu, ecart ([\d.]+) g\)$/.exec(b.reason || "");
       return `<div class="quar-row">
         <div class="hd"><span>${b.box_id}</span><span>${b.ref || L.unknownRef}</span></div>
         <div class="why">${tDet(b.reason) || "—"}</div>
-        ${m ? `<div class="evid"><span>${L.barrier} <b>${m[2]}</b></span>
-                <span>${L.weight} <b>${m[3]}</b></span>
-                <span>${L.delta} <b>${m[1]}</b></span></div>` : ""}
+        ${m ? `<div class="evid"><span>${L.netMass} <b>${m[1]} g</b></span>
+                <span>${L.perCore} <b>${m[3]} g</b></span>
+                <span>${L.gap} <b>${m[4]} g</b></span></div>` : ""}
       </div>`;
     }).join("");
   }
@@ -519,18 +557,41 @@ function render(st) {
   $("invt").tBodies[0].innerHTML = rows.map((b) => {
     const picked = (o?.picks || []).some((p) => p.box_id === b.box_id);
     const done = b.cure_pct >= 100;
+    const canRelocate = b.state === "READY" && b.zone !== "STORAGE";
+    const busy = relocateBusy.has(b.box_id);
     return `<tr class="${picked ? "sel" : ""}" title="${tDet(b.reason) || ""}">
-      <td>${b.box_id}</td><td>${b.ref || "—"}</td><td>${b.label || "—"}</td>
+      <td>${b.box_id}</td>
+      <td class="codecell">${barcodeSvg(b.code)}<div class="codetxt">${b.code || "—"}</div></td>
+      <td>${b.ref || "—"}</td><td>${b.label || "—"}</td>
       <td class="num">${b.qty_initial}</td><td class="num">${b.qty_available}</td>
       <td><span class="tag s-${b.state}">${L.st[b.state] || b.state}</span></td>
-      <td>${b.slot_id || "—"}</td>
+      <td>${b.slot_id || "—"}${b.zone === "STORAGE"
+            ? ` <span class="tag zone-storage">${L.zoneStorage}</span>` : ""}</td>
       <td>${simLabel(b.t_in_sim)}</td>
       <td><div class="cure">
           <div class="bar ${done ? "done" : ""}"><i style="width:${b.cure_pct}%"></i></div>
           <span class="h">${done ? "✓" : b.cure_pct + "%"}</span></div></td>
       <td>${b.confidence || "—"}</td>
-      <td>${b.locked_by || "—"}</td></tr>`;
-  }).join("") || `<tr><td colspan="${INV_COLS.length}" class="muted">—</td></tr>`;
+      <td>${b.locked_by || "—"}</td>
+      <td class="actions">${canRelocate
+            ? `<button class="ghost" data-relocate="${b.box_id}" ${busy ? "disabled" : ""}>${L.moveToStorage}</button>`
+            : "—"}</td></tr>`;
+  }).join("") || `<tr><td colspan="${INV_COLS.length + 1}" class="muted">—</td></tr>`;
+
+  $("invt").tBodies[0].querySelectorAll("[data-relocate]").forEach((btn) => {
+    btn.onclick = async () => {
+      if (btn.disabled) return;
+      const boxId = btn.dataset.relocate;
+      relocateBusy.add(boxId);
+      btn.disabled = true;
+      try {
+        await api(`/box/${boxId}/relocate`, {});
+        renderLog();
+      } finally {
+        relocateBusy.delete(boxId);
+      }
+    };
+  });
 
   // --- banner ---
   if (st.banner && st.banner.t_sim !== lastBannerT) {
@@ -557,6 +618,7 @@ function render(st) {
 // the most recent demand) gets taken out or released.
 // ---------------------------------------------------------------------------
 const pendingOpBusy = new Set();   // order_ids with a confirm/cancel in flight
+const relocateBusy = new Set();    // box_ids with a relocate-to-storage in flight
 
 function renderPendingOrders(st) {
   const el = $("pending-orders");
@@ -624,8 +686,10 @@ async function refreshDbHealth() {
 function eventBits(kind, p) {
   switch (kind) {
     case "box_in": return [p.box_id, p.ref, `${p.qty} ${L.cores}`, p.slot,
-                           p.confidence, p.delta ? `Δ${p.delta}` : null];
-    case "quarantine": return [p.box_id, p.ref || p.declared_ref, tDet(p.reason)];
+                           p.confidence, p.barcode_id];
+    case "quarantine": return [p.box_id, p.ref || p.barcode_id, tDet(p.reason)];
+    case "box_relocated": return [p.box_id, p.ref, p.from_slot, "→", p.to_slot];
+    case "barcode_registered": return [p.barcode_id, p.ref, `${p.unit_mass_g} g/noyau`];
     case "cured": return [p.box_id, `${p.after_h} h`];
     case "demand": return [p.order_id, p.ref, `${p.allocated}/${p.qty}`,
                            (p.picks || []).join(" + ") || null,
@@ -638,9 +702,9 @@ function eventBits(kind, p) {
     case "clock_speed": return [`×${p.speed}`];
     case "env": return [`${(+p.t_c).toFixed(1)} °C`, `${p.rh} %`];
     case "article_new": return [p.ref, p.label, `${p.unit_mass_g} g`];
-    case "box_done_ignored": return [p.ref, tDet(p.reason)];
+    case "box_done_ignored": return [p.barcode_id, tDet(p.reason)];
     case "box_done_invalid": return [p.error];
-    case "arrival_fallback": return [p.box_id, p.ref, tDet(p.reason)];
+    case "arrival_fallback": return [p.box_id, p.barcode_id, tDet(p.reason)];
     case "system_reset": return [p.keep_articles ? "seed=false" : null];
     case "scenario_loaded": return [p.name];
     default: return [JSON.stringify(p)];
@@ -692,6 +756,20 @@ async function refreshArticles() {
   updateDemandHint();
 }
 
+// A worker registers a barcode well before the box ever arrives (CDC step
+// 1) -- this list is every barcode registered but not yet scanned, so the
+// arrival trigger can pick a REAL registered box instead of only ever using
+// the ref+qty convenience path (backend/main.py::_auto_register_barcode).
+async function refreshBarcodes() {
+  const rows = await api("/barcodes?unused=true");
+  const prev = $("bc-pick").value;
+  $("bc-pick").innerHTML = `<option value="">${L.bcAuto}</option>` +
+    (rows || []).map((b) =>
+      `<option value="${b.barcode_id}">${b.barcode_id} — ${b.ref} (${b.unit_mass_g} g)</option>`
+    ).join("");
+  if ((rows || []).some((b) => b.barcode_id === prev)) $("bc-pick").value = prev;
+}
+
 // Live "N in stock" hint for the demand form, driven by the same by_ref
 // totals the KPI/stock panel already shows -- this never invents a number,
 // it just previews the check the backend will make anyway (fifo_allocate:
@@ -734,6 +812,7 @@ async function boot() {
   switchView("rack");
 
   await refreshArticles();
+  await refreshBarcodes();
   $("filt").onchange = () => ST && render(ST);
   $("invsearch").oninput = () => { invSearch = $("invsearch").value; if (ST) render(ST); };
 
@@ -745,7 +824,9 @@ async function boot() {
     b.onclick = () => api("/clock", { speed: +b.dataset.speed }));
   $("jump6").onclick = () => api("/clock", { jump_h: 6 });
   $("btn-scenario").onclick = () =>
-    api("/scenario", { name: "demo" }).then(() => { refreshArticles(); renderLog(); });
+    api("/scenario", { name: "demo" }).then(() => {
+      refreshArticles(); refreshBarcodes(); renderLog();
+    });
 
   $("btn-lang").onclick = () => {
     if (setLang(L.lang === "EN" ? "FR" : "EN")) {
@@ -791,7 +872,7 @@ async function boot() {
   addEventListener("click", closeMenu);
   $("btn-reset").onclick = () => {
     closeMenu();
-    api("/reset", {}).then(() => { refreshArticles(); renderLog(); });
+    api("/reset", {}).then(() => { refreshArticles(); refreshBarcodes(); renderLog(); });
   };
 
   const openRefModal = () => {
@@ -839,16 +920,60 @@ async function boot() {
     renderLog();
   };
 
+  // If a registered-but-unused barcode is picked, scan THAT specific
+  // physical box (the real workflow: identification already happened when
+  // it was registered). Otherwise fall back to the ref+qty convenience,
+  // which auto-registers a throwaway barcode on the spot
+  // (backend/main.py::_auto_register_barcode) so a quick demo press still
+  // works with zero setup.
+  const arrivalBody = () => {
+    const picked = $("bc-pick").value;
+    return picked
+      ? { barcode_id: picked, qty: +$("qty").value, anomaly: $("ano").value }
+      : { ref: $("art").value, qty: +$("qty").value, anomaly: $("ano").value };
+  };
   $("btn-arrive").onclick = async () => {
     const b = $("btn-arrive");
     b.disabled = true; b.textContent = "…";
-    await api("/sim/arrival", { ref: $("art").value, qty: +$("qty").value,
-                                anomaly: $("ano").value });
+    await api("/sim/arrival", arrivalBody());
     b.disabled = false; b.innerHTML = L.arrive + hk("A");
+    $("bc-pick").value = "";
+    refreshBarcodes();
     renderLog();
   };
   $("btn-quick").onclick = () =>
-    api("/sim/box", { ref: $("art").value, qty: +$("qty").value }).then(renderLog);
+    api("/sim/box", arrivalBody()).then(() => {
+      $("bc-pick").value = "";
+      refreshBarcodes();
+      renderLog();
+    });
+
+  $("btn-bc-register").onclick = async () => {
+    const barcodeId = $("bc-id").value.trim();
+    const ref = $("art").value;
+    const art = ARTICLES.find((a) => a.ref === ref);
+    const mass = +$("bc-mass").value || (art ? art.unit_mass_g : 0);
+    if (!barcodeId) {
+      $("bc-err").textContent = L.bcNeedsId;
+      $("bc-err").hidden = false;
+      return;
+    }
+    const b = $("btn-bc-register");
+    b.disabled = true;
+    const res = await api("/barcodes", { barcode_id: barcodeId, ref, unit_mass_g: mass });
+    b.disabled = false;
+    if (res.error) {
+      $("bc-err").textContent = res.error;
+      $("bc-err").hidden = false;
+      return;
+    }
+    $("bc-err").hidden = true;
+    $("bc-id").value = "";
+    $("bc-mass").value = "";
+    await refreshBarcodes();
+    $("bc-pick").value = barcodeId;
+    renderLog();
+  };
 
   const previewEnv = () => {
     $("v-t").textContent = (+$("t_c").value).toFixed(1);

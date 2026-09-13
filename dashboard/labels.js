@@ -12,6 +12,14 @@ export const EN = {
   addRef: "Add reference", cancelRef: "Cancel",
   refAdded: (ref) => `Reference ${ref} added`,
   plant: "Plant model — core arrival",
+  barcodeSection: "Barcode registration (worker action)",
+  barcodeNotice: "A worker labels a box and registers its per-noyau weight "
+                + "BEFORE it ever reaches the conveyor — the scanner below "
+                + "just reads this back, it never counts anything itself.",
+  bcId: "Barcode ID", bcMass: "g / noyau (blank = reference default)",
+  bcRegister: "Register barcode", bcPick: "Scan a registered barcode",
+  bcAuto: "— auto (issue a new one) —",
+  bcNeedsId: "Barcode ID is required",
   article: "Reference", qty: "Quantity", anomaly: "Inject anomaly",
   arrive: "Box arrives on conveyor", quickBox: "Quick box, no ESP32",
   env: "Curing room climate (monitoring)", temp: "Temperature", hum: "Humidity",
@@ -29,7 +37,10 @@ export const EN = {
   lockExpired: "expired",
   kpiSlots: "Slots used", kpiReady: "Ready boxes", kpiDrying: "Curing",
   kpiQuar: "Quarantine", kpiCores: "Cores available", kpiFree: "Free slots",
+  kpiStorage: "Storage used",
   inventory: "Inventory", box: "Box", ref: "Ref", state: "State",
+  code: "Code", actions: "Actions", moveToStorage: "→ Storage",
+  zoneStorage: "STORAGE",
   slot: "Slot", cure: "Cure", left: "Left", conf: "Confidence",
   counts: "Beam / Weight", stored: "Stored at", age: "Age",
   byRef: "Stock by reference", fifoHead: "next out (FIFO)", none: "none ready",
@@ -65,7 +76,7 @@ export const EN = {
 
   // --- crane -----------------------------------------------------------------
   stackerCrane: "Stacker crane", craneIdle: "IDLE", craneStore: "STORE",
-  cranePick: "PICK", craneNoCmd: "no active command",
+  cranePick: "PICK", craneRelocate: "TO STORAGE", craneNoCmd: "no active command",
 
   // --- curing preview ----------------------------------------------------
   curingModule: "Curing", curingNone: "no boxes curing",
@@ -73,8 +84,8 @@ export const EN = {
 
   // --- quarantine ----------------------------------------------------------
   quarantineModule: "Quarantine", quarantineNone: "no boxes in quarantine",
-  unknownRef: "UNKNOWN REFERENCE", barrier: "Barrier", weight: "Weight",
-  delta: "Delta",
+  unknownRef: "UNKNOWN REFERENCE", netMass: "Net mass", perCore: "Per core",
+  gap: "Gap",
 
   // --- rack / slot inspector -----------------------------------------------
   rackView: "RACK", twinView: "3D TWIN", rackTitle: "Warehouse rack — 306 slots",
@@ -136,8 +147,10 @@ export const EN = {
       "demand already covered by older boxes",
   },
   detReadyIn: (h) => `ready in ${h} h`,
-  detDelta: (d, beam, weight) =>
-    `count delta = ${d} (beam ${beam} / weight ${weight})`,
+  detMismatch: (net, code, unit, gap) =>
+    `net mass ${net} g doesn't match barcode ${code} (${unit} g/core expected, gap ${gap} g)`,
+  detUnknownBarcode: (id) => `unregistered barcode: ${id}`,
+  detReusedBarcode: (id) => `barcode already used by ${id}`,
   detOverCapacity: (qty, cap) =>
     `${qty} cores exceeds this box type's capacity (${cap})`,
 };
@@ -153,6 +166,15 @@ export const FR = {
   addRef: "Ajouter la référence", cancelRef: "Annuler",
   refAdded: (ref) => `Référence ${ref} ajoutée`,
   plant: "Modèle physique",
+  barcodeSection: "Enregistrement du code-barre (action ouvrier)",
+  barcodeNotice: "Un ouvrier étiquette la caisse et enregistre son poids "
+                + "par noyau AVANT qu'elle n'atteigne le convoyeur — le "
+                + "scanner ci-dessous ne fait que le relire, il ne compte "
+                + "jamais rien lui-même.",
+  bcId: "Code-barre", bcMass: "g / noyau (vide = valeur de la référence)",
+  bcRegister: "Enregistrer le code-barre", bcPick: "Scanner un code-barre enregistré",
+  bcAuto: "— auto (en émettre un) —",
+  bcNeedsId: "Le code-barre est obligatoire",
   article: "Référence", qty: "Quantité", anomaly: "Injecter une anomalie",
   arrive: "Le box arrive sur le convoyeur", quickBox: "Box rapide, sans ESP32",
   env: "Climat de la zone de séchage (suivi)", temp: "Température", hum: "Humidité",
@@ -170,7 +192,10 @@ export const FR = {
   lockExpiresIn: (s) => `expire dans ${s} s`, lockExpired: "expirée",
   kpiSlots: "Emplacements", kpiReady: "Box prêts", kpiDrying: "En séchage",
   kpiQuar: "Quarantaine", kpiCores: "Noyaux disponibles", kpiFree: "Emplacements libres",
+  kpiStorage: "Stockage utilisé",
   inventory: "Inventaire", box: "Box", ref: "Réf", state: "État",
+  code: "Code", actions: "Actions", moveToStorage: "→ Stockage",
+  zoneStorage: "STOCKAGE",
   slot: "Emplacement", cure: "Séchage", left: "Reste", conf: "Confiance",
   counts: "Barrière / Pesée", stored: "Stocké à", age: "Âge",
   byRef: "Stock par référence", fifoHead: "prochain sorti (FIFO)", none: "aucun prêt",
@@ -206,7 +231,7 @@ export const FR = {
 
   // --- crane -----------------------------------------------------------------
   stackerCrane: "Pont transstockeur", craneIdle: "INACTIF", craneStore: "RANGER",
-  cranePick: "PRÉLEVER", craneNoCmd: "aucune commande active",
+  cranePick: "PRÉLEVER", craneRelocate: "VERS STOCKAGE", craneNoCmd: "aucune commande active",
 
   // --- curing preview ----------------------------------------------------
   curingModule: "Séchage", curingNone: "aucun box en séchage",
@@ -214,8 +239,8 @@ export const FR = {
 
   // --- quarantine ----------------------------------------------------------
   quarantineModule: "Quarantaine", quarantineNone: "aucun box en quarantaine",
-  unknownRef: "RÉFÉRENCE INCONNUE", barrier: "Barrière", weight: "Pesée",
-  delta: "Écart",
+  unknownRef: "RÉFÉRENCE INCONNUE", netMass: "Masse nette", perCore: "Par noyau",
+  gap: "Écart",
 
   // --- rack / slot inspector -----------------------------------------------
   rackView: "RACK", twinView: "JUMEAU 3D", rackTitle: "Rack de l'entrepôt — 306 emplacements",
@@ -274,8 +299,10 @@ export const FR = {
       "besoin déjà couvert par des box plus anciens",
   },
   detReadyIn: (h) => `prêt dans ${h} h`,
-  detDelta: (d, beam, weight) =>
-    `écart de comptage = ${d} (barrière ${beam} / pesée ${weight})`,
+  detMismatch: (net, code, unit, gap) =>
+    `masse nette ${net} g incompatible avec le code-barre ${code} (${unit} g/noyau attendu, écart ${gap} g)`,
+  detUnknownBarcode: (id) => `code-barre non enregistré : ${id}`,
+  detReusedBarcode: (id) => `code-barre déjà utilisé par ${id}`,
   detOverCapacity: (qty, cap) =>
     `${qty} noyaux dépasse la capacité de cette caisse (${cap})`,
 };

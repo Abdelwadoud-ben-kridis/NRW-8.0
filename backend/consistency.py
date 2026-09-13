@@ -58,15 +58,21 @@ def run_checks(con, now_sim: float | None = None) -> dict:
                            "sqlite integrity_check / foreign_key_check failed: %s"
                            % (msgs or fk_errs)))
 
-    # --- DB2: rack geometry matches config -----------------------------------
-    n_slots = con.execute("SELECT COUNT(*) FROM slots").fetchone()[0]
-    if n_slots == C.SLOT_COUNT:
-        checks.append(_row("DB2", "PASS", "slot count matches config geometry (%d)" % n_slots))
+    # --- DB2: rack geometry (+ overflow storage pool) matches config --------
+    n_curing = con.execute(
+        "SELECT COUNT(*) FROM slots WHERE zone='CURING'").fetchone()[0]
+    n_storage = con.execute(
+        "SELECT COUNT(*) FROM slots WHERE zone='STORAGE'").fetchone()[0]
+    if n_curing == C.SLOT_COUNT and n_storage == C.STORAGE_SLOTS:
+        checks.append(_row("DB2", "PASS",
+                           "slot count matches config geometry (%d curing + %d storage)"
+                           % (n_curing, n_storage)))
     else:
         checks.append(_row("DB2", "FAIL",
-                           "slots table has %d rows, config geometry expects %d "
-                           "(FACES=%d COLS=%d LEVELS=%d) -- reseed"
-                           % (n_slots, C.SLOT_COUNT, C.FACES, C.COLS, C.LEVELS)))
+                           "slots table has %d curing / %d storage rows, config expects "
+                           "%d curing (FACES=%d COLS=%d LEVELS=%d) + %d storage -- reseed"
+                           % (n_curing, n_storage, C.SLOT_COUNT, C.FACES, C.COLS, C.LEVELS,
+                              C.STORAGE_SLOTS)))
 
     # --- S1/S2: box <-> slot back-reference agreement -----------------------
     mismatch = DB.rows(con, """

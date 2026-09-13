@@ -94,15 +94,25 @@ connect()
 call("/api/reset", {})
 call("/api/sim/env", {"t_c": 24.0, "rh": 45.0})
 
+# The wire field is still named "ref" (firmware-compatibility -- the board
+# only ever echoes it back, never parses it) but its content is now a
+# barcode_id (contract 1.5): a worker registers one ahead of time, and the
+# conveyor's scanner reads it back. Register two here so the probe's
+# publishes land on a real, known box instead of an "unknown barcode"
+# quarantine.
+call("/api/barcodes", {"barcode_id": "BC-PROBE-1", "ref": "NY-114", "unit_mass_g": 206.0})
+call("/api/barcodes", {"barcode_id": "BC-PROBE-1-FINAL", "ref": "NY-114", "unit_mass_g": 206.0})
+call("/api/barcodes", {"barcode_id": "BC-PROBE-2", "ref": "NY-220", "unit_mass_g": 412.0})
+
 # --- 1. malformed payloads must not kill the loop -----------------------
 before = box_count()
-publish_box_done({"ref": "NY-114"})                      # missing count/gross -- OK, defaults apply
-publish_box_done({"ref": 12345, "count_beam": 1, "gross_g": 100})   # bad ref type
+publish_box_done({"ref": "BC-PROBE-1"})                   # missing gross_g -- OK, default applies
+publish_box_done({"ref": 12345, "gross_g": 100})           # bad ref type
 publish_box_done("not even an object")
-publish_box_done({"ref": "NY-114", "count_beam": "lots", "gross_g": 100})
+publish_box_done({"ref": "BC-PROBE-1", "gross_g": "a lot"})   # bad gross_g type
 time.sleep(1.0)
 # the loop must still be alive: a valid message right after must create a box
-publish_box_done({"ref": "NY-114", "count_beam": 37, "gross_g": 1800.0 + 37 * 206.0, "fw": "probe"})
+publish_box_done({"ref": "BC-PROBE-1-FINAL", "gross_g": 1800.0 + 37 * 206.0, "fw": "probe"})
 time.sleep(1.0)
 after = box_count()
 check("loop_mqtt_in survived malformed messages and still created the valid box",
@@ -113,8 +123,9 @@ check("at least one box_done_invalid event was logged",
 
 # --- 2. exact duplicate unsolicited box_done -> one box, one ignored -----
 call("/api/reset", {})
+call("/api/barcodes", {"barcode_id": "BC-PROBE-2", "ref": "NY-220", "unit_mass_g": 412.0})
 before = box_count("NY-220")
-payload = {"ref": "NY-220", "count_beam": 24, "gross_g": 1800.0 + 24 * 412.0, "fw": "probe"}
+payload = {"ref": "BC-PROBE-2", "gross_g": 1800.0 + 24 * 412.0, "fw": "probe"}
 publish_box_done(payload)
 time.sleep(0.3)
 publish_box_done(dict(payload))     # identical, within UNSOLICITED_DEDUP_S

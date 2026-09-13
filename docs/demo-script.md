@@ -29,11 +29,11 @@ never be empty when they arrive. Six boxes, 34 simulated hours, three cured.
 |---|------|--------------|----------------|
 | 1 | 0:40 | "A foundry core is sand, resin and catalyst. It must dry 24 hours before moulding. Today SOPAL tracks that zone by hand: plastic crates, no traceability. We turned it into a warehouse that sees, counts, remembers and decides." | nothing — let the 3D turn |
 | 2 | 0:40 | "This is the real 6 by 6 by 6 metre room. Single-aisle stacker crane, 2 faces, 9 columns, 17 levels: **306 slots**, 93 % of the floor length and 80 % of the height." | **1** iso, then **4** top, back to **1** |
-| 3 | 1:30 | "A box arrives. The plant model breaks a photoelectric barrier core by core and loads a scale. Those raw signals go over MQTT to the ESP32 — **the board is never told the answer**. It tares, debounces, counts, waits for the mass to settle, and reports." | **A** (box arrives) |
-| 4 | 0:50 | "Two independent measurements: 37 by the barrier, 37 by mass ÷ the reference's known unit weight. They agree, so confidence HAUTE. The crane stores it and the clock starts — automatic timestamp, criterion 3." | point at the ESP32 pill and the new crate |
-| 5 | 1:00 | "Now the anomaly. Same box, three cores missing from the mass." → *pick "Écart de comptage de 3"* → "Barrier says 30, scale says 27. Delta 2 or more is **quarantine**. It never enters stock. A wrongly labelled crate is caught the same way: the average core weight would not match the declared reference." | pick the anomaly, **A** |
+| 3 | 1:30 | "Before a box ever reaches the conveyor, a worker labels it and registers what it holds — a reference and that specific box's own per-noyau weight — right here in the dashboard. No one counts anything by hand; that registration is the only human input in the whole chain. The box arrives, its scanner reads the barcode back — a lookup, not a guess — then it loads onto the scale. That raw weight goes over MQTT to the ESP32 — **the board is never told the answer**, it just tares, waits for the mass to settle, and reports." | register a barcode, then **A** (box arrives) |
+| 4 | 0:50 | "Net weight ÷ that barcode's own registered per-noyau weight = 37, a clean division, so confidence HAUTE. The crane stores it and the clock starts — automatic timestamp, criterion 3." | point at the ESP32 pill, the new crate, and its barcode in the inventory row |
+| 5 | 1:00 | "Now the anomaly. Same barcode, but the physical cores don't match what it promised — swapped after labelling." → *pick "mismatch"* → "The weight doesn't line up with any clean multiple of the registered per-noyau mass, so it's **quarantined**. It never enters stock." | pick the anomaly, **A** |
 | 6 | 1:30 | "Production needs 60 NY-114." → press **D** → "The system proposes BOX-1 then BOX-3 — oldest first. And here is the part that matters: **it tells you what it refused and why**. BOX-5 is rejected, not because it is newer, but because it still needs 9 hours of drying. FIFO you can audit." | **D**, then **C** to confirm — **confirm before doing anything else**: a reservation auto-releases after 2 simulated hours (`LOCK_TTL_H`), and pressing **J** in beat 7 jumps +6 h, which would expire an unconfirmed order in full view of the jury |
-| 7 | 1:00 | *(placeholder — the cahier des charges never asked for a climate-adaptive cure time, and an earlier draft of this beat did; that idea was dropped, see docs/contracts.md CONTRACT VERSION 1.2. Criterion 10 (10 pts, "innovation") needs a replacement beat before the venue.)* One honest option that is already fully built and demonstrable: "The system tells you not just what it will do, but **exactly why it refused everything else** — the FIFO rejected list, per box, per reason — and a built-in consistency checker (`/db`, the green PASS badge) proves the database itself is never in an inconsistent state, live, on demand." | **J** (+6 h) to show a DRYING box crossing to READY; open `/db` to show the consistency badge |
+| 7 | 1:00 | "Two ideas for criterion 10. First: the system tells you not just what it will do, but **exactly why it refused everything else** — the FIFO rejected list, per box, per reason — and a built-in consistency checker (`/db`, the green PASS badge) proves the database itself is never in an inconsistent state, live, on demand. Second: curing capacity is precious, so a cured box that production hasn't asked for yet doesn't have to sit in the rack — one click moves it to overflow storage, freeing the slot for the next arrival, without losing its place in FIFO." | **J** (+6 h) to show a DRYING box crossing to READY; open `/db` to show the consistency badge; click **→ Storage** on a READY box to show it leave the rack |
 
 Close: *"Everything you saw ran live. No video, no slides. The embedded board,
 the warehouse logic and the 3D are three separate programs talking over MQTT
@@ -68,17 +68,21 @@ not notice; neither will they.
 ## Hostile questions, and the honest answer
 
 **"Why no camera? The brief says *voir*."**
-> A photoelectric barrier *is* optical sensing, and it is what foundries
-> actually use — sand dust and variable lighting are exactly where a camera
-> fails. The operator still sees the zone: through the 3D twin, in real time.
-> And we do not rely on one sense — the scale is an independent second opinion
-> on the same box, which a camera alone cannot give you.
+> A barcode scan *is* the identification step — it is exact, unlike a camera
+> guessing at a part under sand dust and variable lighting. The operator
+> still sees the zone through the 3D twin, in real time. And identification
+> is never trusted blind: the scale still has to confirm the weight lines up
+> with a clean whole number of cores at that barcode's own registered mass,
+> or the box is quarantined rather than guessed at.
 
 **"Dividing weight by unit mass is fragile — cores vary."**
-> In this system the unit mass per reference is given data, not measured
-> output, so the division is exact. And we never trust it alone: it only ever
-> *cross-checks* the barrier count. Where they disagree by 2 or more, we refuse
-> the box rather than guess.
+> That is exactly why the per-noyau weight is registered on the SPECIFIC
+> physical box's own barcode, not looked up from a shared article average —
+> batch-to-batch variation is a non-issue because we are dividing by that
+> box's own measured value. And it is not blind trust: if the real contents
+> do not match — swapped after labelling, or a bad registration — the weight
+> will not land on any clean multiple of that value, and the box is
+> quarantined rather than accepted on a guess.
 
 **"Your rack has no physical FIFO mechanism."**
 > Deliberately. Gravity-flow lanes force FIFO but need two access faces, which
@@ -95,3 +99,16 @@ not notice; neither will they.
 **"Is the 3D just a picture?"**
 > It is driven by the same WebSocket as the table. Watch the slot colour change
 > when the box cures. Nothing in that scene is animated by hand.
+
+**"What if the scanner misreads or can't read the barcode at all?"**
+> Then it fails to look anything up, and the box is quarantined as an
+> unregistered code — visibly, in the event log, naming the exact code it
+> read. It is never silently accepted on a best guess. The same goes for a
+> barcode used twice: the second scan is refused as already consumed, so one
+> sticker can never be replayed onto two different physical boxes.
+
+**"What happens when the curing rack is full?"**
+> A cured box doesn't have to wait for a pickup order to leave the rack — it
+> can be relocated to overflow storage with one click, freeing its slot for
+> the next arrival immediately. It keeps its cure record and FIFO position,
+> so it's still the correct box to propose first when demand comes in.

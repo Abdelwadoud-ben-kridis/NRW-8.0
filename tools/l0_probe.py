@@ -19,11 +19,11 @@ one arrival per anomaly through /api/sim/arrival and checks:
   - exactly one box was created per arrival (no duplicate box_done)
   - the box landed in the state its anomaly is supposed to produce
 
-Nominal/off_by_one/mislabel/sensor_dead are article-mass mismatches the
-engine is supposed to catch by the numbers, independent of which device
-answered -- this probe exists to prove the LIVE device path reaches the same
-verdict as L1 already does, not to re-derive the anomaly logic itself
-(algo/test_engine.py owns that).
+none/mismatch/empty are scale-reading outcomes the engine is supposed to
+catch by the numbers, independent of which device answered -- this probe
+exists to prove the LIVE device path reaches the same verdict as L1 already
+does, not to re-derive the anomaly logic itself (algo/test_engine.py owns
+that).
 """
 from __future__ import annotations
 
@@ -68,12 +68,8 @@ try:
     CASES = [
         # (anomaly, expect_mode, expect_state)
         ("none", "L0", "DRYING"),
-        ("off_by_one", "L0", "DRYING"),
-        ("delta", "L0", "QUARANTINE"),
-        ("mislabel", "L0", "QUARANTINE"),
-        # a dead beam sensor means a REAL board never sees an edge either --
-        # L1 is the correct outcome here, not a device failure.
-        ("sensor_dead", "L1", "QUARANTINE"),
+        ("mismatch", "L0", "QUARANTINE"),
+        ("empty", "L0", "QUARANTINE"),
     ]
 
     for anomaly, expect_mode, expect_state in CASES:

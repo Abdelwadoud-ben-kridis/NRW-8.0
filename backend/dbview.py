@@ -25,7 +25,7 @@ from backend import db as DB
 router = APIRouter()
 
 # Whitelisted — table names are never taken from the request as raw SQL.
-TABLES = ("articles", "boxes", "slots", "orders", "events")
+TABLES = ("articles", "boxes", "slots", "orders", "events", "barcodes")
 
 # Hand-described schema: PRAGMA gives us columns/types/FKs accurately, but a
 # jury (or you, at 3 a.m.) reads the RELATIONSHIP faster from a sentence than
@@ -41,6 +41,17 @@ RELATIONS = [
     {"from": "boxes.article_ref", "to": "articles.ref", "kind": "fk",
      "note": "every box holds cores of exactly one reference; NULL only "
              "while state=QUARANTINE and the declared reference was unknown"},
+    {"from": "boxes.code", "to": "barcodes.barcode_id", "kind": "soft",
+     "note": "the barcode a worker scanned off this physical crate (contract "
+             "1.5); NULL only impossible in practice, but no FK-enforced row "
+             "when the scan itself was of an unregistered code"},
+    {"from": "barcodes.ref", "to": "articles.ref", "kind": "fk",
+     "note": "a worker declares which reference a physical box holds when "
+             "registering its barcode, well before it ever arrives"},
+    {"from": "barcodes.used_by_box", "to": "boxes.box_id", "kind": "soft",
+     "note": "set the instant the conveyor's scanner reads this barcode "
+             "(backend/warehouse.py::create_box); a barcode can be consumed "
+             "at most once, accepted or quarantined"},
     {"from": "boxes.slot_id", "to": "slots.slot_id", "kind": "fk",
      "note": "a box occupies at most one slot (NULL while incoming/quarantined); "
              "a partial unique index (uq_boxes_slot) enforces one box per slot"},

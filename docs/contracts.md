@@ -3,7 +3,55 @@
 Owner: **P3 (dashboard / backend / site)**. Everyone codes against this file.
 If you change it, announce it out loud and bump the version line.
 
-    CONTRACT VERSION: 1.4
+    CONTRACT VERSION: 1.5
+
+Changes from 1.4 (barcode-first identification + overflow storage, 2026-09-13):
+
+- **Identification moved off the board, onto a barcode scan.** The real
+  physical process: a worker labels a physical box and registers its own
+  per-noyau weight (`POST /api/barcodes`) well before it ever reaches the
+  conveyor. The conveyor's scanner then reads that barcode back — a lookup,
+  not a guess — and only THEN does the box reach the scale. `algo/engine.py
+  ::assess_box` no longer takes a beam count; quantity is purely
+  `round(net_weight / that barcode's own unit_mass_g)`, and a large residual
+  between the measured weight and any clean multiple of that value is what
+  quarantines a box now, instead of a beam/weight cross-check disagreement.
+  `boxes.count_beam` still exists in the schema and the API for
+  compatibility but is always 0 and carries no meaning any more.
+- **A barcode is one physical box, not a shared type.** Many barcodes can
+  share one `ref` (article), each with its OWN measured `unit_mass_g` —
+  batches vary slightly even within a reference. A barcode is consumed
+  (`used_by_box` set) the instant it's scanned, accepted or quarantined; a
+  second scan of the same barcode is quarantined as `"code-barre deja
+  utilise"`, not treated as a second physical box.
+- **New table `barcodes`** (`barcode_id` PK, `ref`, `unit_mass_g`,
+  `registered_sim`, `used_by_box`) and **new `boxes.code`** column (the
+  scanned `barcode_id`; NULL is impossible in practice since even an
+  unknown scan still gets a QUARANTINE row naming it).
+- **New anomaly set**: `none` / `mismatch` (the physical cores don't match
+  what the barcode promised) / `empty` (no mass added at all). The old
+  beam-cross-check anomalies (`off_by_one`, `delta`, `mislabel`,
+  `sensor_dead`) no longer exist — there is no second sensor left to
+  disagree with the scale.
+- **New endpoints**: `POST /api/barcodes` (register), `GET /api/barcodes`
+  (list, `?unused=true` filters to not-yet-scanned). `POST /api/sim/arrival`
+  and `POST /api/sim/box` now take `barcode_id` (the real workflow) OR the
+  convenience `ref` (auto-registers a throwaway barcode on the spot, so a
+  quick demo/test press still needs zero setup).
+- **The wire `box_done`/`start_box` field is still literally named `ref`**
+  for firmware-compatibility — the board only ever echoes it back, never
+  parses it, so nothing on the ESP32 changed when identification moved to a
+  barcode scan. Its content is a `barcode_id`, not an article reference.
+- **A cured box can move to overflow storage** instead of waiting in the
+  curing rack for a pickup order: `POST /api/box/{id}/relocate` moves a
+  `READY`, unlocked box from the 306-slot curing rack (`slots.zone
+  ='CURING'`) into a separate 12-slot flat pool (`zone='STORAGE'`,
+  `config.STORAGE_SLOTS`), freeing its curing slot for a new arrival without
+  touching its cure record or FIFO position (`t_in_sim` unchanged, so it
+  stays exactly as pickable as before).
+- New WebSocket snapshot fields (§3): `boxes[].code`, `boxes[].zone`,
+  `kpi.storage_total`/`storage_used`/`storage_free`.
+- New event kinds: `barcode_registered`, `box_relocated`.
 
 Changes from 1.3 (box_capacity enforcement, 2026-09-13):
 
@@ -210,6 +258,7 @@ it never crashes the MQTT listener, and telemetry/curing keep running.
 | POST   | `/api/demand`         | `{"ref":"NY-114","qty":40}`            | allocation plan (§4), or `{"error":...}` (400: missing/invalid `ref`/`qty`) |
 | POST   | `/api/demand/confirm` | `{"order_id":"ORD-3"}`                 | `{"ok":true,"already":false,"qty_allocated":N}` — confirming an already-DONE order returns `{"ok":true,"already":true}` instead of deducting again; confirming a CANCELLED/IMPOSSIBLE/unknown order is `{"error":...}` (409/404) |
 | POST   | `/api/demand/cancel`  | `{"order_id":"ORD-3"}`                 | `{"ok":true,"already":false,"released":[box_id,...]}` — cancelling an already-CANCELLED order returns `{"ok":true,"already":true}`; cancelling a DONE/IMPOSSIBLE/unknown order is `{"error":...}` (409/404) |
+| POST   | `/api/box/{id}/relocate` | –                                   | moves a READY, unlocked box from the curing rack into overflow storage (`{"box_id","from_slot","to_slot"}`), or `{"error":...}` (404 unknown box; 409 not READY, already in storage, or no free storage slot) |
 | POST   | `/api/sim/raw`        | `{"beam":0,"load_mv":1843}`            | `{ok:true}` — plant model → MQTT |
 | POST   | `/api/sim/box`        | `{"ref":"NY-114","qty":37}`            | L1 FALLBACK: create a box without the ESP32 |
 | POST   | `/api/sim/env`        | `{"t_c":31.0,"rh":78.0}`               | force curing-room climate — display/evidence only, contract 1.2 (§6.2) |
@@ -249,7 +298,8 @@ Server → client, one JSON object per frame, ~5 Hz:
   "device": {"online":true,"state":"COUNTING","count_beam":37,
              "gross_g":9420.5,"last_seen_sim":93598.0},
   "kpi": {"slots_total":306,"slots_used":37,"boxes_ready":12,
-          "boxes_drying":9,"boxes_quarantine":1,"cores_available":431},
+          "boxes_drying":9,"boxes_quarantine":1,"cores_available":431,
+          "storage_total":12,"storage_used":2,"storage_free":10},
   "boxes": [ /* see below */ ],
   "orders_pending": [ {"order_id":"ORD-3","ref":"NY-114","qty_requested":40,
                        "qty_allocated":40,"lock_expires_sim":97200.0,
@@ -268,6 +318,7 @@ Box object (this exact shape is what the 3D twin and the table both read):
 
 ```json
 { "box_id":"BOX-12", "ref":"NY-114", "label":"Noyau culasse 114",
+  "code":"NY114-00012-A1B2", "zone":"CURING",
   "qty_initial":37, "qty_available":37, "slot_id":"F0-C3-L7",
   "state":"DRYING", "t_in_sim":7200.0, "required_cure_h":26.4,
   "ready_at_sim":102240.0, "cure_pct":38.5,
@@ -275,6 +326,15 @@ Box object (this exact shape is what the 3D twin and the table both read):
   "confidence":"HAUTE", "reason":null,
   "locked_by":null, "lock_expires_sim":null }
 ```
+
+`code` is a traceability label generated once at creation (contract 1.4,
+`backend/warehouse.py::_gen_code`) — analogous to a worker sticking a
+barcode/QR on the physical crate before it reaches the scale. It is never
+read back to make a decision; the mass cross-check in `assess_box` is still
+the only thing that can catch a mislabelled box. `zone` is `"CURING"` (the
+306-slot rack) or `"STORAGE"` (the flat overflow pool a cured box moves to
+via `POST /api/box/{id}/relocate` when it isn't picked up right away) —
+`null` only for a slotless `QUARANTINE`/`EMPTY` box.
 
 `ref` is `null` (and `label` falls back to the quarantine `reason`) for a
 box quarantined against an unrecognised reference (contract 1.2, §1.3) —
@@ -340,17 +400,23 @@ boxes(box_id PK, article_ref FK NULL, qty_initial INT, qty_available INT,
       slot_id FK NULL, state TEXT, t_in_sim REAL, required_cure_h REAL,
       ready_at_sim REAL, count_beam INT, count_weight INT, gross_g REAL,
       confidence TEXT, reason TEXT, locked_by TEXT NULL,
-      lock_expires_sim REAL NULL)
+      lock_expires_sim REAL NULL, code TEXT NULL)
   -- article_ref is NULL only while state='QUARANTINE' (unknown reference,
   -- contract 1.2). A partial unique index on slot_id (WHERE NOT NULL)
-  -- makes "one box per slot" DB-enforced, not just convention.
+  -- makes "one box per slot" DB-enforced, not just convention. `code` is
+  -- the generated barcode/QR traceability label (contract 1.4) -- cosmetic,
+  -- never read back to make a decision.
 
 slots(slot_id PK, face INT, col INT, level INT,
-      occupied_by FK NULL, reserved_for FK NULL)
+      occupied_by FK NULL, reserved_for FK NULL,
+      zone TEXT DEFAULT 'CURING')
   -- occupied_by/reserved_for are soft references (see database-guide.md),
   -- but a partial unique index on occupied_by (WHERE NOT NULL) makes "one
   -- slot per box" DB-enforced. Both are maintained by backend/warehouse.py
-  -- in the same transaction as the box they describe.
+  -- in the same transaction as the box they describe. `zone` (contract 1.4)
+  -- is 'CURING' (the 306-slot rack, config.SLOT_COUNT) or 'STORAGE' (the
+  -- flat config.STORAGE_SLOTS-sized overflow pool a cured box moves to via
+  -- POST /api/box/{id}/relocate) -- a box's zone is that of its current slot.
 
 orders(order_id PK, ref, qty_requested INT, qty_allocated INT,
        status TEXT, created_sim REAL, payload TEXT)

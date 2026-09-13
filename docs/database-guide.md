@@ -9,9 +9,9 @@ three, or checkpoint first (see "Gotchas" below).
 
 Everything that reads or writes it goes through `backend/db.py`, and every
 multi-row mutation runs inside one `backend/db.py::transaction()` (see
-`backend/warehouse.py`). Nothing in this project uses an ORM — it's six
+`backend/warehouse.py`). Nothing in this project uses an ORM — it's seven
 tables and plain SQL, on purpose, so it stays readable at 3 a.m. before a
-demo. Five of those tables carry the live system; the sixth (`meta`) holds
+demo. Six of those tables carry the live system; the seventh (`meta`) holds
 the simulated-clock checkpoint (see §1).
 
 ---
@@ -23,11 +23,12 @@ articles(ref PK, label, unit_mass_g, tolerance_g, box_capacity, cure_floor_h, co
 boxes(box_id PK, article_ref FK->articles NULL, qty_initial, qty_available,
       slot_id FK->slots, state, t_in_sim, required_cure_h, ready_at_sim,
       count_beam, count_weight, gross_g, confidence, reason,
-      locked_by, lock_expires_sim)
-slots(slot_id PK, face, col, level, occupied_by, reserved_for)
+      locked_by, lock_expires_sim, code)
+slots(slot_id PK, face, col, level, occupied_by, reserved_for, zone)
 orders(order_id PK, ref, qty_requested, qty_allocated, status, created_sim, payload)
 events(id PK AUTOINCREMENT, t_sim, kind, payload)
 meta(k PK, v)
+barcodes(barcode_id PK, ref FK->articles, unit_mass_g, registered_sim, used_by_box)
 ```
 
 | table | what a row is | who writes it |
@@ -38,16 +39,21 @@ meta(k PK, v)
 | `orders` | one production demand and the FIFO plan that answered it | `backend/warehouse.py::reserve` (creation), `confirm`/`cancel`/`sweep_expired` (status + payload.status) |
 | `events` | append-only log — every mutation above also writes one row here, in the SAME transaction | throughout `backend/warehouse.py` and `backend/main.py::event()`, via `db.log_event` |
 | `meta` | key/value store for the simulated-clock checkpoint | `db.seed()` resets it (`t_sim`, `speed` back to their config defaults); `backend/warehouse.py::checkpoint_clock` updates it on every mutation and every ~5 real seconds from `loop_clock`; `restore_clock` reads it on backend startup |
+| `barcodes` | one physical box's traceability label — a worker's registration, made before that box ever arrives (CDC step 1) | `backend/warehouse.py::register_barcode` (creation, `POST /api/barcodes`); `create_box` sets `used_by_box` the instant the conveyor's scanner reads it back |
 
 **Relationships**, including the two that aren't real foreign keys:
 
-- `boxes.article_ref -> articles.ref` — real FK, **nullable**. Every box holds cores of exactly one reference, except a box quarantined for an *unrecognised* reference, which has `article_ref = NULL` (its declared, unrecognised ref lives in `reason` instead — see §1b). A partial unique index (`uq_boxes_slot`, `WHERE slot_id IS NOT NULL`) additionally guarantees a slot is never claimed by two boxes.
+- `boxes.article_ref -> articles.ref` — real FK, **nullable**. Every box holds cores of exactly one reference, except a box quarantined for an *unrecognised or already-used* barcode, which has `article_ref = NULL` (or, for a reused barcode, the reference it WAS registered against — see `reason`). A partial unique index (`uq_boxes_slot`, `WHERE slot_id IS NOT NULL`) additionally guarantees a slot is never claimed by two boxes.
 - `boxes.slot_id -> slots.slot_id` — real FK, nullable (NULL while `QUARANTINE` with no free slot, or a fully-picked `EMPTY` box).
 - `slots.occupied_by -> boxes.box_id` — **soft** back-reference, but not unconstrained: a partial unique index (`uq_slots_occupied`, `WHERE occupied_by IS NOT NULL`) guarantees one box per slot at the DB level, and it is updated in the *same transaction* as `boxes.slot_id` (`backend/db.py::transaction`), so the two can never observably disagree.
 - `slots.reserved_for -> orders.order_id` — soft; set while a pick is `RESERVED`, cleared on confirm/cancel/expiry — genuinely maintained now (contract 1.2; it previously was not, see the Gotchas below).
 - `boxes.locked_by -> orders.order_id` — soft; the lock owner, set/cleared alongside `slots.reserved_for`. `backend/consistency.py` check `S4` cross-checks the two agree.
 - `orders.payload` — the full FIFO plan (`picks[]` / `rejected[]`) as a JSON blob, not normalized into rows, captured once at reserve time. `payload.status` is kept equal to the `status` column on every write, so either can be trusted.
 - `events.payload` — JSON blob too, shape depends on `kind` (see `docs/contracts.md` for the event kinds that matter).
+- `boxes.code` — the `barcode_id` the conveyor's scanner actually read off this physical crate (contract 1.5). Unlike a shared article `ref`, a barcode is a single physical box's own registration (`backend/warehouse.py::register_barcode`) and carries its OWN measured `unit_mass_g` — that value, not the article's average, is what `assess_box` divides the scale reading by.
+- `barcodes.ref -> articles.ref` — real FK. A worker declares which reference a physical box holds when registering its barcode, well before it ever arrives.
+- `barcodes.used_by_box -> boxes.box_id` — soft; NULL until the conveyor's scanner reads this barcode back (`create_box`), at which point it's set once and never cleared — a barcode is consumed exactly once, accepted or quarantined. A second scan of the same barcode is quarantined as `"code-barre deja utilise"` rather than treated as a second physical box.
+- `slots.zone` — `'CURING'` (the 306-slot rack, `config.SLOT_COUNT`) or `'STORAGE'` (the flat `config.STORAGE_SLOTS`-slot overflow pool). A box is only ever born into `CURING`; `backend/warehouse.py::relocate` (`POST /api/box/{id}/relocate`) moves a `READY`, unlocked box into `STORAGE`, freeing its curing slot for a new arrival without touching its cure record or FIFO position (`t_in_sim` unchanged).
 
 This same list lives as data (not prose) in `backend/dbview.py::RELATIONS`, which is what the DB Explorer renders — if this file and that list ever disagree, trust `dbview.py` and fix this file.
 

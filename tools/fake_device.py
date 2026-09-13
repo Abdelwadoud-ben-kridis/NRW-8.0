@@ -72,10 +72,12 @@ class FakeEsp32:
             self.last_edge = now
         self.last_beam = beam
 
+        # Weight is the only sensor now (contract 1.5 -- identification moved
+        # to a barcode scan upstream of this stand-in); no beam count gate.
         if abs(mass - self.last_mass) > STABLE_BAND_G:
             self.stable_since = now
             self.stable = False
-        elif now - self.stable_since > STABLE_S and self.count > 0:
+        elif now - self.stable_since > STABLE_S:
             if not self.stable:
                 self.stable = True
                 self.publish_done(client)

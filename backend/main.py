@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import sys
 import time
 
@@ -164,10 +165,14 @@ def box_view(b: dict, now: float) -> dict:
     # is genuinely no article row to join here.
     art = (DB.one(con, "SELECT * FROM articles WHERE ref=?", (b["article_ref"],))
           if b["article_ref"] else None) or {}
+    slot = (DB.one(con, "SELECT zone FROM slots WHERE slot_id=?", (b["slot_id"],))
+           if b["slot_id"] else None)
     return {
         "box_id": b["box_id"], "ref": b["article_ref"],
         "label": art.get("label") or (b["reason"] if not b["article_ref"] else b["article_ref"]),
         "color": art.get("color", "#888"),
+        "code": b["code"],
+        "zone": slot["zone"] if slot else None,
         "qty_initial": b["qty_initial"], "qty_available": b["qty_available"],
         "slot_id": b["slot_id"], "state": b["state"],
         "t_in_sim": b["t_in_sim"], "required_cure_h": round(b["required_cure_h"], 1),
@@ -193,7 +198,14 @@ def snapshot() -> dict:
     boxes = DB.rows(con, "SELECT * FROM boxes ORDER BY t_in_sim")
     boxes.sort(key=E.fifo_key)
     views = [box_view(b, now) for b in boxes]
-    used = sum(1 for b in boxes if b["slot_id"])
+    # slots_used must count only the CURING rack (kpi.slots_total is
+    # C.SLOT_COUNT, the 306-slot rack) -- counting every box.slot_id would
+    # double-count a box after it moves to STORAGE, since it still has a
+    # slot_id, just not one in the rack.
+    used = DB.one(con, "SELECT COUNT(*) c FROM slots "
+                       "WHERE zone='CURING' AND occupied_by IS NOT NULL")["c"]
+    storage_used = DB.one(con, "SELECT COUNT(*) c FROM slots "
+                               "WHERE zone='STORAGE' AND occupied_by IS NOT NULL")["c"]
     counts: dict[str, int] = {}
     for b in boxes:
         counts[b["state"]] = counts.get(b["state"], 0) + 1
@@ -260,6 +272,9 @@ def snapshot() -> dict:
             "slots_total": C.SLOT_COUNT,
             "slots_used": used,
             "slots_free": C.SLOT_COUNT - used,
+            "storage_total": C.STORAGE_SLOTS,
+            "storage_used": storage_used,
+            "storage_free": C.STORAGE_SLOTS - storage_used,
             "boxes_ready": counts.get("READY", 0),
             "boxes_drying": counts.get("DRYING", 0),
             "boxes_reserved": counts.get("RESERVED", 0),
@@ -307,10 +322,10 @@ def event(kind: str, payload: dict) -> None:
 # wrapper only updates the runtime STATE (crane cue, banner) that the rest
 # of main.py's HMI plumbing reads, exactly once, after the commit succeeds.
 
-def store_box(ref: str, count_beam: int, gross_g: float, source: str,
+def store_box(barcode_id: str, gross_g: float, source: str,
              t_c: float | None = None, rh: float | None = None,
              fw: str | None = None) -> dict:
-    res = W.create_box(con, clock.t_sim, ref, count_beam, gross_g, source,
+    res = W.create_box(con, clock.t_sim, barcode_id, gross_g, source,
                        t_c, rh, fw)
     STATE["crane"] = {"cmd": "store", "box_id": res["box_id"],
                       "slot_id": res["slot"]["slot_id"] if res.get("slot") else None,
@@ -377,12 +392,14 @@ def _validate_box_done(payload: dict) -> str | None:
     telemetry/curing/WS for the rest of the session)."""
     if not isinstance(payload, dict):
         return "payload is not a JSON object"
-    ref = payload.get("ref")
-    if not isinstance(ref, str) or not (0 < len(ref) <= 24):
-        return "ref must be a non-empty string <= 24 chars"
-    cb = payload.get("count_beam", 0)
-    if isinstance(cb, bool) or not isinstance(cb, (int, float)) or not (0 <= cb <= 1000):
-        return "count_beam must be a number in [0, 1000]"
+    # Still named "ref" on the wire (firmware-compatibility: the board only
+    # ever echoes this string back, never parses it) -- its content is the
+    # scanned barcode_id since identification moved off the board (contract
+    # 1.5). count_beam may still be present (older/manual boards send it)
+    # but is no longer required or trusted for anything.
+    barcode_id = payload.get("ref")
+    if not isinstance(barcode_id, str) or not (0 < len(barcode_id) <= 24):
+        return "ref (barcode_id) must be a non-empty string <= 24 chars"
     gg = payload.get("gross_g", 0)
     if isinstance(gg, bool) or not isinstance(gg, (int, float)) or not (0 <= gg <= 30000):
         return "gross_g must be a number in [0, 30000]"
@@ -403,32 +420,31 @@ async def handle_box_done(payload: dict) -> None:
                                    if isinstance(payload, dict) else None})
         return
 
-    ref = payload["ref"]
-    count_beam = int(payload.get("count_beam", 0))
+    barcode_id = payload["ref"]
     gross_g = float(payload.get("gross_g", 0.0))
     fw = payload.get("fw")
     t_c = payload.get("t_c")
     rh = payload.get("rh")
-    fp = E.box_fingerprint(ref, count_beam, gross_g, fw)
+    fp = E.box_fingerprint(barcode_id, gross_g, fw)
     now_mono = time.monotonic()
 
     STATE["device"]["last_seen_sim"] = clock.t_sim
     STATE["device"]["last_seen_mono"] = now_mono
 
-    verdict = E.dedup_verdict(_arrival_window, fp, ref, now_mono,
+    verdict = E.dedup_verdict(_arrival_window, fp, barcode_id, now_mono,
                               _last_unsolicited, C.ARRIVAL_GRACE_S,
                               C.UNSOLICITED_DEDUP_S)
     if verdict["action"] == "ignore":
-        event("box_done_ignored", {"ref": ref, "count_beam": count_beam,
+        event("box_done_ignored", {"barcode_id": barcode_id,
                                    "gross_g": round(gross_g, 1),
                                    "reason": verdict["reason"]})
-        print("[box_done] ignored duplicate: %s (%s)" % (ref, verdict["reason"]))
+        print("[box_done] ignored duplicate: %s (%s)" % (barcode_id, verdict["reason"]))
         return
 
     if _arrival_window is None:
         _last_unsolicited = (fp, now_mono)
 
-    res = store_box(ref, count_beam, gross_g, source="esp32", t_c=t_c, rh=rh, fw=fw)
+    res = store_box(barcode_id, gross_g, source="esp32", t_c=t_c, rh=rh, fw=fw)
 
     if verdict["action"] == "resolve_window" and _arrival_window is not None:
         _arrival_window["status"] = "RESOLVED_L0"
@@ -436,7 +452,7 @@ async def handle_box_done(payload: dict) -> None:
         _arrival_window["box_id"] = res["box_id"]
 
     await broadcast()
-    print("[box_done] %s -> %s" % (ref, res["state"]))
+    print("[box_done] %s -> %s" % (barcode_id, res["state"]))
 
 
 async def loop_mqtt_in() -> None:
@@ -465,31 +481,36 @@ async def loop_mqtt_in() -> None:
             print("[loop_mqtt_in] error handling %s (continuing): %s" % (topic, exc))
 
 
-def split_for_capacity(ref: str, qty: int) -> list[int]:
-    """A physical crate can't hold more cores than its declared
-    box_capacity: "70 arrived" for a 69-capacity reference means two crates
-    showed up (69 + 1), not one 70-count crate (algo.engine.assess_box
-    quarantines that as an overloaded crate if it ever reaches it as one
-    request). Simulated/manual arrivals are the one place that CAN split
-    a big ask into several right-sized crates before it gets there.
+def _auto_register_barcode(ref: str, qty: int) -> str | None:
+    """Convenience path for a quick test/demo run that just wants "a box of
+    NY-114" without a separate registration step: mint a throwaway barcode
+    for that reference, at the article's own unit_mass_g, and register it
+    right now. Returns None if `ref` doesn't exist.
+
+    The REAL workflow (a worker registers a barcode well before the box
+    ever arrives, POST /api/barcodes) is unaffected and still fully
+    supported -- this only fires when the caller passes `ref` instead of an
+    already-registered `barcode_id`.
     """
-    art = DB.one(con, "SELECT box_capacity FROM articles WHERE ref=?", (ref,))
-    cap = int(art["box_capacity"]) if art and art["box_capacity"] else 0
-    if cap <= 0 or qty <= cap:
-        return [qty]
-    chunks, remaining = [], qty
-    while remaining > 0:
-        chunks.append(min(cap, remaining))
-        remaining -= cap
-    return chunks
+    art = DB.one(con, "SELECT * FROM articles WHERE ref=?", (ref,))
+    if art is None:
+        return None
+    barcode_id = "AUTO-%s-%s" % (ref, secrets.token_hex(3).upper())
+    W.register_barcode(con, clock.t_sim, barcode_id, ref, art["unit_mass_g"])
+    return barcode_id
 
 
-async def run_arrival(ref: str, qty: int, anomaly: str = "none") -> dict:
+async def run_arrival(barcode_id: str, qty: int, anomaly: str = "none") -> dict:
     """Play one box arrival through the plant model, at 10 Hz.
 
-    L0: the ESP32 is listening, counts, and answers on scw/<S>/dev/box_done.
-    L1: no answer within the timeout -> the backend does the ESP32's arithmetic
-        itself and stores the box anyway. Identical screen, demo never dies.
+    L0: the ESP32 is listening, weighs, and answers on scw/<S>/dev/box_done.
+    L1: no answer within the timeout -> the backend does the ESP32's
+        arithmetic itself and stores the box anyway. Identical screen, demo
+        never dies.
+
+    `barcode_id` must already be registered (POST /api/barcodes) and unused
+    -- that lookup already happened one level up in api_arrival, which is
+    also where the convenience "just give me a ref" path auto-registers one.
 
     Opens an arrival window (see algo.engine.dedup_verdict) so a device
     answer that lands AFTER the L1 grace period is recognised as the same
@@ -499,15 +520,21 @@ async def run_arrival(ref: str, qty: int, anomaly: str = "none") -> dict:
     """
     global _arrival_window
     async with _arrival_lock:
-        art = DB.one(con, "SELECT * FROM articles WHERE ref=?", (ref,))
-        if art is None:
-            return {"error": "unknown ref"}
-        frames = PLANT.build_arrival(art, qty, anomaly)
-        my_epoch = _epoch
-        _arrival_window = {"ref": ref, "status": "OPEN", "resolved_at": None,
-                           "box_id": None}
+        bc = DB.one(con, "SELECT * FROM barcodes WHERE barcode_id=?", (barcode_id,))
+        if bc is None:
+            return {"error": "unknown or unregistered barcode_id: %s" % barcode_id}
+        if bc["used_by_box"]:
+            return {"error": "barcode already used: %s" % barcode_id}
 
-        mq.pub(C.T_CMD, {"cmd": "start_box", "ref": ref})
+        frames = PLANT.build_arrival(bc["unit_mass_g"], qty, anomaly)
+        my_epoch = _epoch
+        _arrival_window = {"barcode_id": barcode_id, "status": "OPEN",
+                           "resolved_at": None, "box_id": None}
+
+        # Still the wire field name "ref" (firmware-compatibility: the board
+        # only ever echoes this string back, never parses it) -- its content
+        # is the scanned barcode_id, not an article reference.
+        mq.pub(C.T_CMD, {"cmd": "start_box", "ref": barcode_id})
 
         for f in frames:
             if _epoch != my_epoch:
@@ -529,16 +556,14 @@ async def run_arrival(ref: str, qty: int, anomaly: str = "none") -> dict:
 
         # --- L1 fallback: byte-identical outcome, computed here --------------
         STATE["mode"] = "L1"
-        beam = sum(1 for i, f in enumerate(frames)
-                   if f["beam"] == 0 and (i == 0 or frames[i - 1]["beam"] == 1))
         gross = PLANT.final_gross_g(frames)
-        res = store_box(ref, beam, gross, source="L1",
+        res = store_box(barcode_id, gross, source="L1",
                         t_c=STATE["env"]["t_c"], rh=STATE["env"]["rh"])
         _arrival_window["status"] = "RESOLVED_L1"
         _arrival_window["resolved_at"] = time.monotonic()
         _arrival_window["box_id"] = res["box_id"]
-        event("arrival_fallback", {"ref": ref, "qty": qty, "anomaly": anomaly,
-                                   "box_id": res["box_id"],
+        event("arrival_fallback", {"barcode_id": barcode_id, "qty": qty,
+                                   "anomaly": anomaly, "box_id": res["box_id"],
                                    "reason": "no device answer within grace period"})
         await broadcast()
         return {"mode": "L1", **{k: v for k, v in res.items() if k != "slot"}}
@@ -637,23 +662,25 @@ async def api_env(body: dict):
 
 @app.post("/api/sim/arrival")
 async def api_arrival(body: dict):
-    """The demo's main button: a box lands on the conveyor.
+    """The demo's main button: a registered box lands on the conveyor,
+    scanner first, then the scale.
 
-    A qty over the reference's box_capacity plays out as SEVERAL sequential
-    arrivals (one per crate) rather than one oversized box (split_for_capacity).
+    Pass a pre-registered `barcode_id` for the real workflow (a worker ran
+    POST /api/barcodes ahead of time). The convenience `ref` form instead
+    auto-mints and registers a throwaway barcode for that reference on the
+    spot, so a quick demo/test press of A doesn't need a separate
+    registration step first.
     """
-    ref = body.get("ref") or DB.ARTICLES[0][0]
+    barcode_id = body.get("barcode_id")
     qty = int(body.get("qty", 37))
     anomaly = body.get("anomaly", "none")
-    chunks = split_for_capacity(ref, qty)
-    res = {}
-    for chunk_qty in chunks:
-        res = await run_arrival(ref, chunk_qty, anomaly)
-        if res.get("mode") == "aborted":
-            break
+    if not barcode_id:
+        ref = body.get("ref") or DB.ARTICLES[0][0]
+        barcode_id = _auto_register_barcode(ref, qty)
+        if barcode_id is None:
+            return JSONResponse({"error": "unknown ref: %s" % ref}, 400)
+    res = await run_arrival(barcode_id, qty, anomaly)
     await broadcast()
-    if len(chunks) > 1:
-        res = {**res, "boxes": len(chunks), "split_qty": chunks}
     return res
 
 
@@ -661,18 +688,44 @@ async def api_arrival(body: dict):
 async def api_sim_box(body: dict):
     """L1 shortcut: create a box with no plant model and no ESP32 at all.
 
-    Same capacity split as /api/sim/arrival -- see split_for_capacity.
+    Same `barcode_id`-or-`ref` convenience as /api/sim/arrival.
     """
-    ref = body.get("ref") or DB.ARTICLES[0][0]
+    barcode_id = body.get("barcode_id")
     qty = int(body.get("qty", 37))
-    art = DB.one(con, "SELECT * FROM articles WHERE ref=?", (ref,))
-    res = {}
-    for chunk_qty in split_for_capacity(ref, qty):
-        gross = C.TARE_G + chunk_qty * (art["unit_mass_g"] if art else 200.0)
-        res = store_box(ref, chunk_qty, gross, source="manual",
-                        t_c=STATE["env"]["t_c"], rh=STATE["env"]["rh"])
+    if not barcode_id:
+        ref = body.get("ref") or DB.ARTICLES[0][0]
+        barcode_id = _auto_register_barcode(ref, qty)
+        if barcode_id is None:
+            return JSONResponse({"error": "unknown ref: %s" % ref}, 400)
+    bc = DB.one(con, "SELECT * FROM barcodes WHERE barcode_id=?", (barcode_id,))
+    gross = C.TARE_G + qty * (bc["unit_mass_g"] if bc else 200.0)
+    res = store_box(barcode_id, gross, source="manual",
+                    t_c=STATE["env"]["t_c"], rh=STATE["env"]["rh"])
     await broadcast()
     return {k: v for k, v in res.items() if k != "slot"}
+
+
+@app.post("/api/barcodes")
+async def api_barcodes_add(body: dict):
+    """A worker's action, well before any conveyor run (CDC step 1): label a
+    physical box and register what it holds. See
+    backend/warehouse.py::register_barcode."""
+    try:
+        res = W.register_barcode(con, clock.t_sim, body.get("barcode_id"),
+                                 body.get("ref"), body.get("unit_mass_g"))
+    except W.OpError as e:
+        return JSONResponse({"error": e.message}, e.code)
+    await broadcast()
+    return res
+
+
+@app.get("/api/barcodes")
+async def api_barcodes_list(unused: bool = False):
+    sql = "SELECT * FROM barcodes"
+    if unused:
+        sql += " WHERE used_by_box IS NULL"
+    sql += " ORDER BY registered_sim DESC"
+    return DB.rows(con, sql)
 
 
 @app.post("/api/sim/raw")
@@ -739,6 +792,24 @@ async def api_cancel(body: dict):
         return JSONResponse({"error": e.message}, e.code)
     if STATE["last_order"] and STATE["last_order"].get("order_id") == oid:
         STATE["last_order"] = None
+    await broadcast()
+    return res
+
+
+@app.post("/api/box/{box_id}/relocate")
+async def api_relocate(box_id: str):
+    """CDC's second cured-box outcome: not picked up yet, so it moves out of
+    the curing rack into overflow storage, freeing its curing slot."""
+    try:
+        res = W.relocate(con, clock.t_sim, box_id)
+    except W.OpError as e:
+        return JSONResponse({"error": e.message}, e.code)
+    STATE["crane"] = {"cmd": "relocate", "box_id": box_id,
+                      "slot_id": res["to_slot"], "seq": STATE["crane"]["seq"] + 1}
+    STATE["banner"] = {"kind": "ok",
+                       "text": "%s transfere vers le stockage %s"
+                               % (box_id, res["to_slot"]),
+                       "t_sim": clock.t_sim}
     await broadcast()
     return res
 

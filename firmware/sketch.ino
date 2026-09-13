@@ -132,11 +132,16 @@ void onRaw(int beam, float load_mv) {
   if (beam == 1) digitalWrite(PIN_LED, LOW);
   g_lastBeam = beam;
 
-  // 3. STABILITY: mass unchanged for STABLE_MS -> the box is finished
+  // 3. STABILITY: mass unchanged for STABLE_MS -> the box is finished.
+  // Weight is the only sensor now (contract 1.5 -- identification moved to
+  // a barcode scan upstream of this board; see docs/contracts.md), so this
+  // no longer waits on a beam count. A settled reading is reported whether
+  // it holds cores or not -- an empty/near-empty box is still a valid,
+  // reportable outcome, and the backend's assess_box is what quarantines it.
   if (fabs(mass - g_lastMass) > STABLE_BAND_G) {
     g_stableMs = millis();
     g_stable = false;
-  } else if (millis() - g_stableMs > STABLE_MS && g_count > 0) {
+  } else if (millis() - g_stableMs > STABLE_MS) {
     if (!g_stable) { g_stable = true; publishBoxDone(); }
   }
   g_lastMass = mass;

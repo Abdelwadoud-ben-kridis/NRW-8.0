@@ -109,111 +109,75 @@ def hours_remaining(t_in_sim: float, required_h: float, now_sim: float) -> float
 
 def count_from_weight(gross_g: float, unit_mass_g: float,
                       tare_g: float = TARE_G) -> int:
-    """Second, independent core count, derived from mass alone.
+    """Core count derived from mass alone: (gross - tare) / unit_mass_g.
 
-    Valid here because each reference's unit mass is GIVEN ground truth in this
-    simulation, not variable manufacturing output.
+    `unit_mass_g` is that SPECIFIC box's own registered per-noyau weight
+    (backend/warehouse.py::register_barcode), not a shared article average --
+    each physical box's barcode carries its own measured value.
     """
     if unit_mass_g <= 0:
         return 0
     return max(0, round((gross_g - tare_g) / unit_mass_g))
 
 
-def assess_box(article: dict, count_beam: int, gross_g: float,
+def assess_box(barcode: dict, article: dict, gross_g: float,
                tare_g: float = TARE_G) -> dict:
-    """Cross-check two independent measurements of the same box.
+    """Count a box from the scale alone.
 
-    measurement A : count_beam   — photoelectric barrier event count
-    measurement B : count_weight — (gross - tare) / unit_mass_g
+    Identification already happened before this ever runs: the conveyor's
+    barcode scanner read `barcode_id` and backend/warehouse.py::create_box
+    looked it up, so the reference and per-noyau weight are GIVEN, not
+    guessed -- an unregistered or already-used barcode never reaches this
+    function at all (it's quarantined one level up, in create_box).
+
+    The scale is the only sensor left, so there is only one question left to
+    ask: does the net mass look like a clean whole number of cores at THIS
+    box's own registered weight?
+
+        count    = round((gross - tare) / barcode's unit_mass_g)
+        residual = |net - count * unit_mass_g|
+
+    A small residual means the physical contents match what the barcode
+    promised. A large one means a mismatch -- cores swapped after labelling,
+    the wrong sticker on the wrong box, or a weight mismeasured at
+    registration -- and it is caught here with no second sensor needed: the
+    weight simply will not line up with any clean multiple of the registered
+    per-noyau mass. Honest limitation: for a very light reference, a
+    mismatched box can coincidentally land near a multiple of the wrong
+    weight and slip through; there is no second measurement here to catch
+    that, by design (finding: the earlier beam+scale cross-check gave that
+    protection at the cost of hardware complexity the CDC never asked for).
 
     Returns a dict ready to be written straight into the `boxes` row:
         {count_weight, quantity, confidence, accepted, state, reason,
-         unit_mass_measured, delta}
-
-    Decision table
-    --------------
-    Identification runs FIRST, and asks one question: is the net mass an
-    integer multiple of the declared reference's unit mass? A correctly
-    labelled crate always is, whatever the barrier counted. A mislabelled one
-    is not. That ordering matters -- it keeps "wrong part" and "miscounted"
-    as two distinct diagnoses instead of blaming whichever fires first.
-
-        net not a multiple of unit_mass -> QUARANTINE, wrong reference
-        |A-B| == 0  -> ACCEPTED, qty = A,          confidence HAUTE
-        |A-B| == 1  -> ACCEPTED, qty = min(A,B),   confidence MOYENNE
-        |A-B| >= 2  -> QUARANTINE, counting fault
-        otherwise-accepted qty > article's box_capacity -> QUARANTINE,
-            overloaded crate (a crate cannot physically hold more cores than
-            its declared capacity; simulated/manual arrivals that ask for
-            more than one crate's worth are the CALLER's job to split into
-            several boxes before this ever sees them -- see
-            backend/main.py::split_for_capacity)
-
-    Honest limitation: for a very light reference, a mislabelled crate can
-    land near a multiple of the declared unit mass by coincidence. It is then
-    caught by the count disagreement instead. Either way the crate is
-    quarantined -- only the wording of the reason differs.
+         unit_mass_measured}
     """
-    unit = float(article["unit_mass_g"])
+    unit = float(barcode["unit_mass_g"])
     tol = float(article.get("tolerance_g", 5.0))
     net = gross_g - tare_g
-    count_weight = count_from_weight(gross_g, unit, tare_g)
-    delta = abs(count_beam - count_weight)
-    unit_measured = (net / count_beam) if count_beam > 0 else 0.0
+    count = count_from_weight(gross_g, unit, tare_g)
+    residual = abs(net - count * unit)
+    id_tol = max(tol, 0.12 * unit)          # covers load-cell noise
 
     out = {
-        "count_beam": int(count_beam),
-        "count_weight": int(count_weight),
+        "count_weight": int(count),
         "gross_g": float(gross_g),
-        "delta": int(delta),
-        "unit_mass_measured": round(unit_measured, 1),
+        "unit_mass_measured": round((net / count), 1) if count > 0 else 0.0,
     }
 
-    # --- IDENTIFICATION ------------------------------------------------------
-    # The question is NOT "does net/count_beam equal the unit mass" -- that
-    # conflates two different faults. If the barrier miscounted, net/count_beam
-    # is wrong even though the crate is correctly labelled.
-    #
-    # The clean discriminator: is the net mass an integer multiple of the
-    # DECLARED reference's unit mass? Any correctly-labelled crate must be,
-    # whatever the barrier saw. A crate of some other part is not.
-    residual = abs(net - count_weight * unit)
-    id_tol = max(tol, 0.12 * unit)          # covers load-cell noise
-    if net > unit * 0.5 and residual > id_tol:
+    if count <= 0 or residual > id_tol:
         out.update(quantity=0, confidence="NULLE", accepted=False,
                    state="QUARANTINE",
-                   reason=("masse nette %.0f g incompatible avec %s : "
-                           "aucun multiple entier de %.1f g (ecart %.0f g)"
-                           % (net, article["ref"], unit, residual)))
+                   reason=("masse nette %.0f g incompatible avec le code-barre "
+                           "%s (%.1f g/noyau attendu, ecart %.0f g)"
+                           % (net, barcode["barcode_id"], unit, residual)))
         return out
 
-    if count_beam == 0 and net > unit * 0.5:    # mass present, barrier saw none
-        out.update(quantity=0, confidence="NULLE", accepted=False,
-                   state="QUARANTINE",
-                   reason="masse detectee mais aucun passage barriere (capteur HS ?)")
-        return out
-
-    # --- QUANTITY ------------------------------------------------------------
-    # The reference is confirmed, so a disagreement between the two counts is a
-    # COUNTING fault, and it is reported as one.
-    if delta == 0:
-        out.update(quantity=count_beam, confidence="HAUTE", accepted=True,
-                   state="STORING", reason=None)
-    elif delta == 1:
-        out.update(quantity=min(count_beam, count_weight), confidence="MOYENNE",
-                   accepted=True, state="STORING",
-                   reason="ecart de 1 entre barriere et pesee, quantite prudente retenue")
-    else:
-        out.update(quantity=0, confidence="NULLE", accepted=False,
-                   state="QUARANTINE",
-                   reason="ecart de comptage = %d (barriere %d / pesee %d)"
-                          % (delta, count_beam, count_weight))
-        return out
+    out.update(quantity=count, confidence="HAUTE", accepted=True,
+               state="STORING", reason=None)
 
     # --- CAPACITY --------------------------------------------------------------
     # A crate cannot physically hold more cores than its declared capacity.
-    # This runs after identification/quantity so a wrong-reference or
-    # counting fault is still reported as that fault, not masked by this one.
     capacity = int(article.get("box_capacity") or 0)
     if capacity > 0 and out["quantity"] > capacity:
         out.update(accepted=False, state="QUARANTINE",
@@ -505,24 +469,27 @@ def lock_expired(box: dict, now_sim: float) -> bool:
 # new is added to the box_done payload, so this works with any device
 # (Wokwi, tools/fake_device.py, the real board) unmodified.
 
-def box_fingerprint(ref: str, count_beam: int, gross_g: float,
-                    fw: str | None) -> tuple:
+def box_fingerprint(barcode_id: str, gross_g: float, fw: str | None) -> tuple:
     """A cheap identity for a physical box_done payload, gram rounded to 0.1
     so the plant model's noise cannot make one real box look like two."""
-    return (ref, int(count_beam), round(float(gross_g), 1), fw or "")
+    return (barcode_id, round(float(gross_g), 1), fw or "")
 
 
-def dedup_verdict(window: dict | None, fp: tuple, ref: str, now_mono: float,
+def dedup_verdict(window: dict | None, fp: tuple, barcode_id: str, now_mono: float,
                   last_unsolicited: tuple | None, grace_s: float,
                   unsolicited_dedup_s: float) -> dict:
     """Decide what an incoming box_done should do to the database.
 
     window   -- the arrival window this backend is tracking for the box
                 currently expected on the conveyor, or None:
-                {"ref": str, "status": "OPEN"|"RESOLVED_L0"|"RESOLVED_L1",
+                {"barcode_id": str, "status": "OPEN"|"RESOLVED_L0"|"RESOLVED_L1",
                  "resolved_at": float|None}
     fp       -- box_fingerprint(...) of the incoming message
-    ref      -- the incoming message's own `ref` field
+    barcode_id -- the incoming message's own identity field (still named
+                "ref" on the wire for firmware-compatibility -- the board
+                only ever echoes it back, never parses it, so nothing there
+                needed to change when identification moved to a barcode
+                scan; see docs/contracts.md CONTRACT VERSION 1.5)
     now_mono -- time.monotonic() at receipt (transport domain, never t_sim)
     last_unsolicited -- (fingerprint, mono_time) of the last box accepted
                 with no open window, or None if there hasn't been one yet
@@ -535,7 +502,8 @@ def dedup_verdict(window: dict | None, fp: tuple, ref: str, now_mono: float,
                           is the normal L0 path: the device answered in time)
         ignore         -- a duplicate; do not touch the database
     """
-    if window is not None and window["status"] == "OPEN" and window["ref"] == ref:
+    if (window is not None and window["status"] == "OPEN"
+            and window["barcode_id"] == barcode_id):
         return {"action": "resolve_window", "reason": None}
 
     if window is not None and window["status"] in ("RESOLVED_L0", "RESOLVED_L1"):

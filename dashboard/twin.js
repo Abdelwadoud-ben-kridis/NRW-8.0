@@ -44,17 +44,43 @@ let jobQueue = [];      // queued {steps:[{x,y,fork,onArrive?,holdMs?}], i, wait
 let job = null;         // the job currently being animated
 let craneSeq = -1;
 
+// Overflow storage (backend/warehouse.py::relocate) is a flat pool on open
+// floor between the rack and the back wall -- a cured box that hasn't been
+// picked up yet lands here. Kept well clear of the rack's own footprint
+// (|z| tops out around GEO.aisle + crate depth/2, ~1.6 m) and inside the
+// 6 x 6 m envelope drawn by buildRoom(), so nothing floats outside the room
+// the pitch shows the jury. Must stay in sync with backend/config.py's
+// STORAGE_SLOTS only in spirit -- a few extra never break the layout.
+const STORAGE_COLS = 6;
+const STORAGE_COL_W = 0.6;
+const STORAGE_ORIGIN_X = -(STORAGE_COLS - 1) * STORAGE_COL_W / 2;
+const STORAGE_Y = 0.10;
+const STORAGE_BASE_Z = 2.1;
+const STORAGE_ROW_Z = 0.5;
+
 // ---------------------------------------------------------------------------
 export function slotPosition(slotId) {
   // "F0-C3-L7" -> world position of that slot's crate centre
-  const m = /^F(\d+)-C(\d+)-L(\d+)$/.exec(slotId || "");
-  if (!m) return null;
-  const [, f, c, l] = m.map(Number);
-  return new THREE.Vector3(
-    -GEO.rackX / 2 + (c - 0.5) * GEO.colW,
-    (l - 0.5) * GEO.lvlH + 0.06,
-    (f === 0 ? -1 : 1) * GEO.aisle
-  );
+  const rack = /^F(\d+)-C(\d+)-L(\d+)$/.exec(slotId || "");
+  if (rack) {
+    const [, f, c, l] = rack.map(Number);
+    return new THREE.Vector3(
+      -GEO.rackX / 2 + (c - 0.5) * GEO.colW,
+      (l - 0.5) * GEO.lvlH + 0.06,
+      (f === 0 ? -1 : 1) * GEO.aisle
+    );
+  }
+  const storage = /^STORAGE-(\d+)$/.exec(slotId || "");
+  if (storage) {
+    const n = Number(storage[1]) - 1;
+    const row = Math.floor(n / STORAGE_COLS), col = n % STORAGE_COLS;
+    return new THREE.Vector3(
+      STORAGE_ORIGIN_X + col * STORAGE_COL_W,
+      STORAGE_Y,
+      STORAGE_BASE_Z + row * STORAGE_ROW_Z
+    );
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +149,15 @@ function buildRoom() {
     new THREE.Vector3(-R / 2, 0, -R / 2), new THREE.Vector3(R / 2, R, R / 2));
   const helper = new THREE.Box3Helper(box, 0x2f3d4d);
   scene.add(helper);
+
+  // overflow-storage floor marker -- see slotPosition()'s STORAGE_* consts
+  const storageW = STORAGE_COLS * STORAGE_COL_W;
+  const pad = new THREE.Mesh(
+    new THREE.PlaneGeometry(storageW, STORAGE_ROW_Z * 2 + 0.3),
+    new THREE.MeshStandardMaterial({ color: 0x1c2836, roughness: 0.9 }));
+  pad.rotation.x = -Math.PI / 2;
+  pad.position.set(0, 0.005, STORAGE_BASE_Z + STORAGE_ROW_Z / 2);
+  scene.add(pad);
 }
 
 function buildRacks() {
