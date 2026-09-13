@@ -3,8 +3,8 @@
 
 export const EN = {
   lang: "EN",
-  title: "Smart Core Warehouse",
-  subtitle: "SOPAL & SOPALTEC — NRW 8.0 INSAT",
+  title: "SCW / NRW 8.0",
+  subtitle: "SMART CORE WAREHOUSE",
   clock: "Simulated clock", speed: "Speed", jump6: "+6 h", reset: "Reset",
   scenario: "Load demo scenario", more: "More", dbExplorer: "DB Explorer",
   newRef: "New reference", refCode: "Code", refLabel: "Label",
@@ -22,21 +22,76 @@ export const EN = {
   picks: "Boxes selected", rejected: "Boxes rejected — and why",
   noOrder: "No order yet. Ask production for cores.",
   shortfall: "Shortfall", allocated: "Allocated", requested: "Requested",
+  demandAvail: (n) => `${n} in stock`,
+  demandTooMuch: (n) => `Only ${n} in stock for this reference — cannot request more.`,
   warehouse: "Warehouse",
   pendingOrders: "Pending reservations", lockExpiresIn: (s) => `expires in ${s} s`,
   lockExpired: "expired",
-  kpiSlots: "Slots used", kpiReady: "Ready", kpiDrying: "Drying",
-  kpiQuar: "Quarantine", kpiCores: "Cores ready", kpiFree: "Free slots",
+  kpiSlots: "Slots used", kpiReady: "Ready boxes", kpiDrying: "Curing",
+  kpiQuar: "Quarantine", kpiCores: "Cores available", kpiFree: "Free slots",
   inventory: "Inventory", box: "Box", ref: "Ref", state: "State",
   slot: "Slot", cure: "Cure", left: "Left", conf: "Confidence",
   counts: "Beam / Weight", stored: "Stored at", age: "Age",
   byRef: "Stock by reference", fifoHead: "next out (FIFO)", none: "none ready",
   nextOut: "Next out (FIFO)", colReady: "Ready", colDrying: "Curing",
   filterAll: "All references", kpiReserved: "Reserved",
-  events: "Activity", device: "ESP32", broker: "Broker",
+  events: "Live event log", device: "ESP32", broker: "Broker",
   online: "online", offline: "offline", mode: "Mode",
   legend: "Slot colour", cores: "cores", boxes: "boxes",
   refusedShort: "refused",
+
+  // --- top bar / system status --------------------------------------------
+  systemOnline: "SYSTEM ONLINE", systemReconnecting: "RECONNECTING",
+  systemOffline: "OFFLINE", systemPolling: "POLLING FALLBACK",
+  contract: "CONTRACT", shortcuts: "Shortcuts", simControls: "Sim controls",
+  dbPass: "PASS", dbWarn: "WARN", dbFail: "FAIL", dbChecks: "CHECKS",
+
+  // --- live operation panel -------------------------------------------------
+  liveOperation: "Live operation", stageIdle: "SYSTEM NOMINAL",
+  stageReceiving: "RECEIVING", stageCounting: "COUNTING",
+  stageStabilizing: "STABILIZING", stageStoring: "STORING",
+  stageAllocating: "ALLOCATING", stageReserved: "RESERVED",
+  stageConfirmed: "CONFIRMED", stageQuarantine: "QUARANTINE",
+  stageFault: "FAULT", stageCuring: "CURING IN PROGRESS", stageReady: "READY",
+  stageIdleSub: "no activity in progress",
+  stageSub: "derived from ESP32 state, crane command and last order",
+
+  // --- ESP32 instrument panel -----------------------------------------------
+  liveEsp32: "Live ESP32", beamCount: "cores (beam)", grossMass: "gross mass",
+  stable: "stable", unstable: "settling", lastSeen: "last seen",
+  fw: "firmware", noSignalYet: "no telemetry yet",
+  esp32St: { IDLE: "IDLE", COUNTING: "COUNTING", STABILIZING: "STABILIZING",
+             DONE: "DONE", FAULT: "FAULT" },
+
+  // --- crane -----------------------------------------------------------------
+  stackerCrane: "Stacker crane", craneIdle: "IDLE", craneStore: "STORE",
+  cranePick: "PICK", craneNoCmd: "no active command",
+
+  // --- curing preview ----------------------------------------------------
+  curingModule: "Curing", curingNone: "no boxes curing",
+  curingMore: (n) => `+${n} more curing`,
+
+  // --- quarantine ----------------------------------------------------------
+  quarantineModule: "Quarantine", quarantineNone: "no boxes in quarantine",
+  unknownRef: "UNKNOWN REFERENCE", barrier: "Barrier", weight: "Weight",
+  delta: "Delta",
+
+  // --- rack / slot inspector -----------------------------------------------
+  rackView: "RACK", twinView: "3D TWIN", rackTitle: "Warehouse rack — 306 slots",
+  slotFree: "free slot", slotSelectHint: "click a slot to inspect it",
+  reference: "Reference", label2: "Label", quantity: "Quantity",
+  available: "Available", arrival: "Arrival", lock: "Lock", reason2: "Reason",
+  noLock: "none", noReason: "—",
+
+  // --- inventory table -------------------------------------------------------
+  searchPlaceholder: "search box / ref / label…",
+
+  // --- reservation panel ------------------------------------------------------
+  orderExpired: "ORDER EXPIRED", reservationReleased: "RESERVATION RELEASED",
+  noPending: "No pending reservations.",
+
+  // --- database health -------------------------------------------------------
+  database: "Database",
   st: {
     INCOMING: "Incoming", IDENTIFYING: "Identifying", COUNTING: "Counting",
     STORING: "Storing", DRYING: "Drying", READY: "Ready", RESERVED: "Reserved",
@@ -67,6 +122,7 @@ export const EN = {
     "quarantaine": "quarantine",
     "indisponible": "unavailable",
     "plus recent (FIFO)": "newer (FIFO)",
+    "stock insuffisant": "not enough stock",
   },
   det: {
     "pas encore stocke": "not stored yet",
@@ -82,12 +138,14 @@ export const EN = {
   detReadyIn: (h) => `ready in ${h} h`,
   detDelta: (d, beam, weight) =>
     `count delta = ${d} (beam ${beam} / weight ${weight})`,
+  detOverCapacity: (qty, cap) =>
+    `${qty} cores exceeds this box type's capacity (${cap})`,
 };
 
 export const FR = {
   lang: "FR",
-  title: "Smart Core Warehouse",
-  subtitle: "SOPAL & SOPALTEC — NRW 8.0 INSAT",
+  title: "SCW / NRW 8.0",
+  subtitle: "SMART CORE WAREHOUSE",
   clock: "Horloge simulée", speed: "Vitesse", jump6: "+6 h", reset: "Réinitialiser",
   scenario: "Charger le scénario démo", more: "Plus", dbExplorer: "Base de données",
   newRef: "Nouvelle référence", refCode: "Code", refLabel: "Libellé",
@@ -105,21 +163,76 @@ export const FR = {
   picks: "Box retenus", rejected: "Box écartés — et pourquoi",
   noOrder: "Aucune commande. Exprimez un besoin de production.",
   shortfall: "Manquant", allocated: "Alloué", requested: "Demandé",
+  demandAvail: (n) => `${n} en stock`,
+  demandTooMuch: (n) => `Seulement ${n} en stock pour cette référence — impossible de demander plus.`,
   warehouse: "Entrepôt",
   pendingOrders: "Réservations en attente",
   lockExpiresIn: (s) => `expire dans ${s} s`, lockExpired: "expirée",
-  kpiSlots: "Emplacements", kpiReady: "Prêts", kpiDrying: "En séchage",
-  kpiQuar: "Quarantaine", kpiCores: "Noyaux prêts", kpiFree: "Emplacements libres",
+  kpiSlots: "Emplacements", kpiReady: "Box prêts", kpiDrying: "En séchage",
+  kpiQuar: "Quarantaine", kpiCores: "Noyaux disponibles", kpiFree: "Emplacements libres",
   inventory: "Inventaire", box: "Box", ref: "Réf", state: "État",
   slot: "Emplacement", cure: "Séchage", left: "Reste", conf: "Confiance",
   counts: "Barrière / Pesée", stored: "Stocké à", age: "Âge",
   byRef: "Stock par référence", fifoHead: "prochain sorti (FIFO)", none: "aucun prêt",
   nextOut: "Prochain sorti (FIFO)", colReady: "Prêts", colDrying: "Séchage",
   filterAll: "Toutes les références", kpiReserved: "Réservé",
-  events: "Journal", device: "ESP32", broker: "Broker",
+  events: "Journal d'activité", device: "ESP32", broker: "Broker",
   online: "en ligne", offline: "hors ligne", mode: "Mode",
   legend: "Couleurs", cores: "noyaux", boxes: "box",
   refusedShort: "écartés",
+
+  // --- top bar / system status --------------------------------------------
+  systemOnline: "SYSTÈME EN LIGNE", systemReconnecting: "RECONNEXION",
+  systemOffline: "HORS LIGNE", systemPolling: "REPLI POLLING",
+  contract: "CONTRAT", shortcuts: "Raccourcis", simControls: "Simulation",
+  dbPass: "OK", dbWarn: "AVERT.", dbFail: "ÉCHEC", dbChecks: "CONTRÔLES",
+
+  // --- live operation panel -------------------------------------------------
+  liveOperation: "Opération en cours", stageIdle: "SYSTÈME NOMINAL",
+  stageReceiving: "RÉCEPTION", stageCounting: "COMPTAGE",
+  stageStabilizing: "STABILISATION", stageStoring: "RANGEMENT",
+  stageAllocating: "ALLOCATION", stageReserved: "RÉSERVÉ",
+  stageConfirmed: "VALIDÉ", stageQuarantine: "QUARANTAINE",
+  stageFault: "DÉFAUT", stageCuring: "SÉCHAGE EN COURS", stageReady: "PRÊT",
+  stageIdleSub: "aucune activité en cours",
+  stageSub: "déduit de l'état ESP32, de la commande du pont et de la commande en cours",
+
+  // --- ESP32 instrument panel -----------------------------------------------
+  liveEsp32: "ESP32 en direct", beamCount: "noyaux (barrière)", grossMass: "masse brute",
+  stable: "stable", unstable: "stabilisation", lastSeen: "vu pour la dernière fois",
+  fw: "firmware", noSignalYet: "pas encore de télémétrie",
+  esp32St: { IDLE: "INACTIF", COUNTING: "COMPTAGE", STABILIZING: "STABILISATION",
+             DONE: "TERMINÉ", FAULT: "DÉFAUT" },
+
+  // --- crane -----------------------------------------------------------------
+  stackerCrane: "Pont transstockeur", craneIdle: "INACTIF", craneStore: "RANGER",
+  cranePick: "PRÉLEVER", craneNoCmd: "aucune commande active",
+
+  // --- curing preview ----------------------------------------------------
+  curingModule: "Séchage", curingNone: "aucun box en séchage",
+  curingMore: (n) => `+${n} autres en séchage`,
+
+  // --- quarantine ----------------------------------------------------------
+  quarantineModule: "Quarantaine", quarantineNone: "aucun box en quarantaine",
+  unknownRef: "RÉFÉRENCE INCONNUE", barrier: "Barrière", weight: "Pesée",
+  delta: "Écart",
+
+  // --- rack / slot inspector -----------------------------------------------
+  rackView: "RACK", twinView: "JUMEAU 3D", rackTitle: "Rack de l'entrepôt — 306 emplacements",
+  slotFree: "emplacement libre", slotSelectHint: "cliquez un emplacement pour l'inspecter",
+  reference: "Référence", label2: "Libellé", quantity: "Quantité",
+  available: "Disponible", arrival: "Arrivée", lock: "Verrou", reason2: "Motif",
+  noLock: "aucun", noReason: "—",
+
+  // --- inventory table -------------------------------------------------------
+  searchPlaceholder: "rechercher box / réf / libellé…",
+
+  // --- reservation panel ------------------------------------------------------
+  orderExpired: "COMMANDE EXPIRÉE", reservationReleased: "RÉSERVATION LIBÉRÉE",
+  noPending: "Aucune réservation en attente.",
+
+  // --- database health -------------------------------------------------------
+  database: "Base de données",
   st: {
     INCOMING: "Arrivée", IDENTIFYING: "Identification", COUNTING: "Comptage",
     STORING: "Rangement", DRYING: "Séchage", READY: "Prêt", RESERVED: "Réservé",
@@ -147,6 +260,7 @@ export const FR = {
     "quarantaine": "quarantaine",
     "indisponible": "indisponible",
     "plus recent (FIFO)": "plus récent (FIFO)",
+    "stock insuffisant": "stock insuffisant",
   },
   det: {
     "pas encore stocke": "pas encore stocké",
@@ -162,7 +276,31 @@ export const FR = {
   detReadyIn: (h) => `prêt dans ${h} h`,
   detDelta: (d, beam, weight) =>
     `écart de comptage = ${d} (barrière ${beam} / pesée ${weight})`,
+  detOverCapacity: (qty, cap) =>
+    `${qty} noyaux dépasse la capacité de cette caisse (${cap})`,
 };
 
-// <<< THE ONE LINE TO FLIP FOR THE JURY >>>
-export const L = EN;
+// Runtime language switch (dashboard/app.js's language toggle button), kept
+// as ES module live bindings: `export let L` means every module that does
+// `import { L } from "./labels.js"` sees the SAME reassignment the instant
+// setLang() runs here -- no per-component duplication of the FR/EN choice.
+export const LANGS = { EN, FR };
+
+function _initialLang() {
+  try {
+    const saved = localStorage.getItem("scw_lang");
+    if (saved && LANGS[saved]) return saved;
+  } catch { /* private mode / disabled storage: fall back below */ }
+  return "EN";
+}
+
+// <<< previously "the one line to flip for the jury" — now also a live
+// toggle in the top bar; this default is just the initial paint. >>>
+export let L = LANGS[_initialLang()];
+
+export function setLang(key) {
+  if (!LANGS[key] || LANGS[key] === L) return false;
+  L = LANGS[key];
+  try { localStorage.setItem("scw_lang", key); } catch { /* ignore */ }
+  return true;
+}
