@@ -35,10 +35,10 @@ SCALE_NOISE_G = 5.0
 # CDC hard requirement: every box dries exactly 24 h, no exceptions. This is
 # NOT a floor for an adaptive model -- the CDC (cahier des charges) never asks
 # for one, and contract 1.2 drops the earlier adaptive-cure idea entirely.
-# Temperature/RH are kept only as arrival evidence on the box (what the ESP32
-# measured at that moment) and displayed on the HMI; they never feed cure
-# math. See docs/contracts.md CONTRACT VERSION 1.2 and the plan's decision
-# log for why (2026-09-12).
+# Temperature/RH sensing (a DHT22) was removed from the firmware in contract
+# 1.8 for the same reason: once the adaptive model was gone, the reading had
+# no consumer left, decision or display. See docs/contracts.md CONTRACT
+# VERSION 1.2/1.8 and the plan's decision log for why (2026-09-12/13).
 CURE_FLOOR_H = 24.0
 
 # a RESERVED box auto-releases after this many SIMULATED hours if nobody
@@ -82,9 +82,8 @@ _NOT_PICKABLE = {
 # Fixed 24 h for every box, every reference, every climate -- the CDC's exact
 # requirement, no more and no less. An earlier draft explored an adaptive
 # model that extended the requirement in a cold/humid room; the CDC does not
-# ask for that, so it was dropped in contract 1.2. Temperature/RH remain on
-# the HMI and on each box's arrival evidence for traceability, but are pure
-# display -- nothing here reads them.
+# ask for that, so it was dropped in contract 1.2, and the DHT22 sensor that
+# only ever fed that dropped model was removed in contract 1.8.
 
 def required_cure_h() -> float:
     """The one cure requirement in this system: exactly 24 h, always.

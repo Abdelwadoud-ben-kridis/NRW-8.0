@@ -92,7 +92,6 @@ print("mqtt probe against", BASE, " session=%s" % C.SESSION)
 connect()
 
 call("/api/reset", {})
-call("/api/sim/env", {"t_c": 24.0, "rh": 45.0})
 
 # The wire field is still named "ref" (firmware-compatibility -- the board
 # only ever echoes it back, never parses it) but its content is now a

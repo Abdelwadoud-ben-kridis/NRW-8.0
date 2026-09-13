@@ -113,8 +113,7 @@ def _insert_box_row(con, now_sim: float, box_id: str, article_ref: str | None,
 
 
 def create_box(con, now_sim: float, barcode_id: str, gross_g: float,
-               source: str, t_c: float | None = None, rh: float | None = None,
-               fw: str | None = None, batch_id: str | None = None,
+               source: str, fw: str | None = None, batch_id: str | None = None,
                vision: dict | None = None) -> dict:
     """Create exactly one box from one arrival's evidence.
 
@@ -148,8 +147,7 @@ def create_box(con, now_sim: float, barcode_id: str, gross_g: float,
         bc = DB.one(con, "SELECT * FROM barcodes WHERE barcode_id=?", (barcode_id,))
         box_id = DB.next_id(con, "boxes", "box_id", "BOX")
         evidence = {"gross_g": round(float(gross_g), 1),
-                    "t_c": t_c, "rh": rh, "fw": fw, "source": source,
-                    "batch_id": batch_id}
+                    "fw": fw, "source": source, "batch_id": batch_id}
 
         if bc is None:
             reason = "code-barre inconnu: %s" % barcode_id
@@ -328,8 +326,7 @@ def reserve(con, now_sim: float, ref: str, qty: int) -> dict:
 
 
 def produce_for_batch(con, now_sim: float, order_id: str, barcode_id: str,
-                      gross_g: float, source: str, t_c: float | None = None,
-                      rh: float | None = None, fw: str | None = None) -> dict:
+                      gross_g: float, source: str, fw: str | None = None) -> dict:
     """Produce one box FOR an open production batch -- the make-to-order
     half of demand fulfilment (see reserve()). Identical scan/weigh path as
     any other arrival (create_box); production gets no shortcut around
@@ -340,7 +337,7 @@ def produce_for_batch(con, now_sim: float, order_id: str, barcode_id: str,
         raise OpError("order %s is not in production (status %s)"
                       % (order_id, row["status"]), code=409)
     return create_box(con, now_sim, barcode_id, gross_g, source,
-                      t_c, rh, fw, batch_id=order_id)
+                      fw, batch_id=order_id)
 
 
 def batch_status(con, order_id: str) -> dict:

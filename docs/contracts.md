@@ -3,7 +3,44 @@
 Owner: **P3 (dashboard / backend / site)**. Everyone codes against this file.
 If you change it, announce it out loud and bump the version line.
 
-    CONTRACT VERSION: 1.7
+    CONTRACT VERSION: 1.8
+
+Changes from 1.7 (remove the DHT22 / curing-room-climate feature entirely,
+2026-09-13):
+
+- **The DHT22 temperature/humidity sensor is gone from the firmware.**
+  `firmware/sketch.ino` no longer includes the DHT library, reads GPIO 15,
+  or carries `t_c`/`rh` in `box_done`/telemetry; `firmware/diagram.json`
+  drops the `wokwi-dht22` part and its wiring; `firmware/libraries.txt`
+  drops `DHT sensor library` and `Adafruit Unified Sensor`. Firmware tag
+  bumped to `"1.2"` (`tools/fake_device.py` mirrors all of this, tag
+  `"fake-1.2"`).
+- **Why:** the sensor only ever fed an adaptive cure-time model that was
+  dropped in contract 1.2 because the CDC never asked for one. Once that
+  model was gone, the reading had no consumer at all -- not the cure
+  calculation, not even the firmware's own commands (`onMessage`'s `T_CMD`
+  handling never had an `"env"` case, so the backend's old
+  `POST /api/sim/env` push to the board was already inert before this
+  change). Keeping a sensor whose only job was to be displayed and ignored
+  was flagged as exactly the kind of decorative complexity this project
+  otherwise avoids.
+- **The whole "curing room climate" concept is removed, backend to
+  dashboard**, not just the physical sensor, since the same reasoning
+  (nothing reads it) applied to the rest of the feature: `POST
+  /api/sim/env` is deleted, `STATE["env"]` is gone from `backend/main.py`,
+  `t_c`/`rh` are no longer accepted by `create_box`/`produce_for_batch`/
+  `store_box`/`handle_box_done`, no longer attached to raw MQTT frames or
+  arrival evidence, and no longer part of the `GET /api/state` snapshot.
+  The dashboard's climate sliders and readouts are removed from
+  `dashboard/index.html`/`app.js`/`labels.js`; the "Cure requirement
+  (fixed)" readout (still exactly 24.0 h, always) is kept on its own.
+- **Nothing about the cure rule itself changed.** It was already a fixed
+  24 h for every box regardless of climate (contract 1.2) -- this contract
+  just removes the now-pointless instrumentation around that fact, it does
+  not touch the fact itself. `tools/test_firmware_contract.py` gained
+  explicit "is gone" checks (mirroring how contract 1.7 checks the removed
+  beam sensor); `tools/smoke.py`/`mqtt_probe.py`/`l0_probe.py` no longer
+  call the deleted endpoint.
 
 Changes from 1.6 (simulated vision cross-check, partial FIFO picks, batch
 stock protection, and a way out of quarantine, 2026-09-13):
@@ -300,16 +337,14 @@ first 10 minutes at the venue.
 ### 1.1 `scw/<S>/sim/raw` — backend → ESP32, 10 Hz
 
 ```json
-{ "beam": 1, "load_mv": 1843, "t_c": 24.6, "rh": 52.0, "t_sim": 93600.0 }
-{ "load_mv": 1843, "t_c": 24.6, "rh": 52.0, "t_sim": 93601.0, "final": true }
+{ "beam": 1, "load_mv": 1843, "t_sim": 93600.0 }
+{ "load_mv": 1843, "t_sim": 93601.0, "final": true }
 ```
 
 | field     | type  | meaning                                                        |
 |-----------|-------|----------------------------------------------------------------|
 | `beam`    | 0/1   | legacy/unused (contract 1.7 -- weight is the only sensor); still accepted if present, never read |
 | `load_mv` | int   | load-cell amplifier output, 0..3300 mV (0 mV = 0 g, 3300 = 30 kg)|
-| `t_c`     | float | ambient temperature in the curing room, °C                      |
-| `rh`      | float | relative humidity, %                                            |
 | `t_sim`   | float | simulated clock, seconds. **Never wall clock.**                 |
 | `final`   | bool, optional | contract 1.7: set only on the LAST frame of an arrival -- a limit-switch-style "the crate has left the counting station" signal, not a measurement. Lets the firmware shorten its stability wait instead of relying purely on a timeout that ordinary MQTT jitter could clip a core off of. Omitted/false on every other frame. |
 
@@ -321,7 +356,7 @@ Mass conversion used by BOTH sides (hard-coded constant, do not change after H2)
 
 ```json
 { "state":"COUNTING", "count_beam":37, "gross_g":9420.5,
-  "stable":true, "t_c":24.6, "rh":52.0, "up_ms":128400 }
+  "stable":true, "up_ms":128400 }
 ```
 
 `state` ∈ `IDLE | COUNTING | STABILIZING | DONE | FAULT`.
@@ -333,8 +368,7 @@ It never mutates the database.
 **This is the only message that creates a box.**
 
 ```json
-{ "ref":"NY-114", "count_beam":37, "gross_g":9420.5,
-  "t_c":24.6, "rh":52.0, "fw":"1.0" }
+{ "ref":"NY-114", "count_beam":37, "gross_g":9420.5, "fw":"1.2" }
 ```
 
 Backend response: run `algo.engine.assess_box(...)`, INSERT into `boxes`,
@@ -387,7 +421,6 @@ it never crashes the MQTT listener, and telemetry/curing keep running.
 | POST   | `/api/demand/cancel`  | `{"order_id":"ORD-3"}`                 | PENDING: releases its picks back to READY. IN_PRODUCTION: clears `batch_id` on its boxes, returning them to general stock. Both: `{"ok":true,"already":false,"released":[box_id,...]}` — cancelling an already-CANCELLED order returns `{"ok":true,"already":true}`; cancelling a DONE/IMPOSSIBLE/unknown order is `{"error":...}` (409/404) |
 | POST   | `/api/sim/raw`        | `{"beam":0,"load_mv":1843}`            | `{ok:true}` — plant model → MQTT |
 | POST   | `/api/sim/box`        | `{"barcode_id":"BC-1042","qty":37}` or `{"ref":"NY-114",...}`, optional `"batch_order_id"` | L1 FALLBACK: create a box without the ESP32 |
-| POST   | `/api/sim/env`        | `{"t_c":31.0,"rh":78.0}`               | force curing-room climate — display/evidence only, contract 1.2 (§6.2) |
 | POST   | `/api/reset`          | `{"seed":true}` (default) or `{"seed":false}` | wipe + reseed everything, or (with `seed:false`) wipe boxes/orders/events/slots/barcodes but keep the current `articles` |
 | POST   | `/api/scenario`       | `{"name":"demo"}`                      | loads the rehearsed 6-box / 34 h demo history (full reseed) — the **S** hotkey |
 | GET    | `/api/events?limit=200` | –                                    | event log |
@@ -424,7 +457,6 @@ Server → client, one JSON object per frame, ~5 Hz:
   "t_sim": 93600.0,
   "speed": 60,
   "clock_label": "J+1 02:00",
-  "env": {"t_c":24.6,"rh":52.0},
   "device": {"online":true,"state":"COUNTING","count_beam":37,
              "gross_g":9420.5,"last_seen_sim":93598.0},
   "kpi": {"slots_total":306,"slots_used":37,"boxes_ready":12,
@@ -672,8 +704,9 @@ to general stock instead of discarding them.
    use `time.monotonic()`, but only in backend runtime memory — never
    written to a warehouse column.)
 2. `required_cure_h = 24.0`, always, for every box and every reference —
-   **fixed, not adaptive** (contract 1.2). `t_c`/`rh` are recorded on each
-   box as arrival evidence and shown on the HMI, but never computed with.
+   **fixed, not adaptive** (contract 1.2). There is no climate sensor or
+   input anywhere in this system any more (contract 1.8 removed the DHT22
+   that used to feed the dropped adaptive model).
 3. FIFO sort key is `(t_in_sim, box_id)`, and the `box_id` tiebreak is
    compared **numerically** (`algo.engine.fifo_key`), not as a string —
    `BOX-2` sorts before `BOX-10`. Every place that orders boxes for FIFO

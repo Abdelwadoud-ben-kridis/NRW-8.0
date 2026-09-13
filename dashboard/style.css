@@ -237,16 +237,7 @@ button.textlink:hover{background:none;color:var(--accent)}
 .esp32-foot{display:flex;justify-content:space-between;margin-top:8px;font-size:10.5px;
   color:var(--faint);font-family:var(--mono)}
 
-/* ============================================================
-   ENVIRONMENT (monitoring only)
-   ============================================================ */
-.envrow{display:flex;gap:8px}
-.envmetric{flex:1;background:var(--panel3);border:1px solid var(--line-soft);
-  border-radius:var(--r);padding:8px 10px;text-align:center}
-.envmetric .v{font-family:var(--mono);font-size:19px;font-weight:800;color:var(--res)}
-.envmetric .k{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.6px;
-  margin-top:2px;font-weight:700}
-.cureline{display:flex;justify-content:space-between;align-items:center;margin-top:8px;
+.cureline{display:flex;justify-content:center;align-items:center;margin-top:8px;
   background:var(--panel3);border:1px solid var(--line-soft);border-radius:var(--r);
   padding:7px 9px;font-size:10.5px;color:var(--dim)}
 .cureline b{color:var(--warn);font-family:var(--mono);font-size:12px}

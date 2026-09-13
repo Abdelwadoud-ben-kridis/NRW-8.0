@@ -85,9 +85,14 @@ check("publishBoxDone() found in sketch.ino", bool(m))
 # count_beam is gone from the wire payload (contract 1.7): weight is the
 # board's only sensor, the second count comes from the simulated vision
 # station upstream, not from anything this board reads.
-for field in ("ref", "gross_g", "t_c", "rh", "fw"):
+for field in ("ref", "gross_g", "fw"):
     check('box_done includes "%s"' % field, ('d["%s"]' % field) in body)
 check("count_beam is NOT sent any more (contract 1.7)", 'count_beam' not in body)
+# t_c/rh (DHT22) are gone (contract 1.8): they only ever fed an adaptive
+# cure model that was dropped in 1.2, so the sensor had nothing left to do.
+for field in ("t_c", "rh"):
+    check('box_done does NOT include "%s" (contract 1.8)' % field,
+          ('d["%s"]' % field) not in body)
 
 # The `final` marker (contract 1.7) is what closes the premature-publish
 # race: without it, sketch.ino can only guess a box is done from a
@@ -98,12 +103,12 @@ check("a shorter STABLE_MS_FINAL exists for once `final` has arrived",
      "STABLE_MS_FINAL" in sketch)
 
 # --- 4. wiring matches the judging requirement (real, legible pins) --------
-required_pins = {"PIN_DONE": "26", "PIN_POT": "34",
-                 "PIN_LED": "2", "PIN_DHT": "15"}
+required_pins = {"PIN_DONE": "26", "PIN_POT": "34", "PIN_LED": "2"}
 for name, pin in required_pins.items():
     got = find(r"#define\s+%s\s+(\d+)" % name, sketch, name)
     if got:
         check("%s is GPIO %s" % (name, pin), got == pin)
+check("PIN_DHT is gone from sketch.ino (contract 1.8)", "PIN_DHT" not in sketch)
 
 conns = diagram["connections"]
 
@@ -121,7 +126,8 @@ check("diagram.json: no leftover beam button wiring (contract 1.7)",
      not wired("btnBeam:2.l", "esp:D25"))
 check("diagram.json: done button on esp:D26", wired("btnDone:2.l", "esp:D26"))
 check("diagram.json: potentiometer signal on esp:D34", wired("pot:SIG", "esp:D34"))
-check("diagram.json: DHT22 data on esp:D15", wired("dht:SDA", "esp:D15"))
+check("diagram.json: no leftover DHT22 part (contract 1.8)",
+     not any(p.get("type") == "wokwi-dht22" for p in diagram["parts"]))
 check("diagram.json: LED driven from esp:D2 through the resistor",
       wired("esp:D2", "r1:1"))
 r1 = next((p for p in diagram["parts"] if p["id"] == "r1"), None)
@@ -145,6 +151,8 @@ check("sketch.ino initialises the OLED without blocking on failure",
 libs = open(os.path.join(ROOT, "firmware", "libraries.txt"), encoding="utf-8").read()
 for lib in ("Adafruit GFX Library", "Adafruit SSD1306"):
     check('libraries.txt lists "%s"' % lib, lib in libs)
+check('libraries.txt does NOT list "DHT sensor library" (contract 1.8)',
+      "DHT sensor library" not in libs)
 
 print("\n" + ("ALL GREEN" if not fails else "%d FAILURE(S): %s" % (len(fails), fails)))
 sys.exit(1 if fails else 0)

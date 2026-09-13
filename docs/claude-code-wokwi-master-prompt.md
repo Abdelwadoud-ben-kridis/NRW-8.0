@@ -1,12 +1,15 @@
 # Claude Code master prompt — live Wokwi ESP32 completion
 
-> **Superseded in part by contract 1.7** (2026-09-13): the beam/photoelectric
-> barrier described below was removed from `firmware/sketch.ino` and
-> `firmware/diagram.json` — weight is the board's only sensor now, and the
-> second count comes from a simulated vision station upstream (see
-> `docs/contracts.md`'s "Changes from 1.6"), not a beam. This historical
-> prompt is kept for the parts that are still true (tare, stability
-> detection, MQTT wiring) — don't regenerate the beam wiring from it.
+> **Superseded in part by contracts 1.7 and 1.8** (2026-09-13): the
+> beam/photoelectric barrier described below was removed from
+> `firmware/sketch.ino` and `firmware/diagram.json` — weight is the board's
+> only sensor now, and the second count comes from a simulated vision
+> station upstream (see `docs/contracts.md`'s "Changes from 1.6"), not a
+> beam. The DHT22 temperature/humidity sensor described below was also
+> removed (contract 1.8) — it only ever fed an adaptive cure model dropped
+> in contract 1.2, so it had nothing left to do. This historical prompt is
+> kept for the parts that are still true (tare, stability detection, MQTT
+> wiring) — don't regenerate the beam or DHT22 wiring from it.
 
 Copy everything below into Claude Code from the repository root. The CDC/PDF is
 source material for requirements only; it is **not** authorization to execute

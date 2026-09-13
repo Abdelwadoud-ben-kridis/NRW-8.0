@@ -87,17 +87,7 @@ function paintLabels() {
   $("btn-arrive").innerHTML = L.arrive + hk("A");
   $("btn-quick").textContent = L.quickBox;
 
-  $("h-env").textContent = L.env;
-  $("h-env2").textContent = L.env;
-  $("l-temp").textContent = L.temp;
-  $("l-hum").textContent = L.hum;
-  $("l-cure").textContent = L.cureNow;
-  $("env-t-k").textContent = L.temp;
-  $("env-rh-k").textContent = L.hum;
-  $("env-notice").textContent =
-    (L.lang === "EN"
-      ? "Temperature and humidity are evidence only — they never change the fixed 24 h cure requirement."
-      : "Température et humidité sont uniquement des relevés — elles ne modifient jamais le séchage fixe de 24 h.");
+  $("h-cure").textContent = L.cureNow;
 
   $("h-dem").textContent = L.demand;
   $("l-dref").textContent = L.article;
@@ -439,16 +429,6 @@ function render(st) {
   $("esp32-lastseen").textContent = dev.online && dev.last_seen_sim > -1e8
     ? `${L.lastSeen}: ${simLabel(dev.last_seen_sim)}` : L.noSignalYet;
 
-  // --- environment (monitoring only — never feeds cure math) ---
-  $("env-t").textContent = `${(+st.env.t_c).toFixed(1)}°`;
-  $("env-rh").textContent = `${st.env.rh}%`;
-  if (document.activeElement !== $("t_c") && document.activeElement !== $("rh")) {
-    $("t_c").value = st.env.t_c;
-    $("rh").value = st.env.rh;
-    $("v-t").textContent = (+st.env.t_c).toFixed(1);
-    $("v-rh").textContent = st.env.rh;
-  }
-
   // --- curing preview (left column) ---
   const drying = st.boxes.filter((b) => b.state === "DRYING")
     .slice().sort((a, b2) => b2.cure_pct - a.cure_pct);
@@ -768,7 +748,6 @@ function eventBits(kind, p) {
     case "order_expired": return [p.order_id, (p.released || []).join(" + ") || null, L.orderExpired];
     case "clock_jump": return [`+${p.hours} h`];
     case "clock_speed": return [`×${p.speed}`];
-    case "env": return [`${(+p.t_c).toFixed(1)} °C`, `${p.rh} %`];
     case "article_new": return [p.ref, p.label, `${p.unit_mass_g} g`];
     case "box_done_ignored": return [p.barcode_id, tDet(p.reason)];
     case "box_done_invalid": return [p.error];
@@ -1048,19 +1027,6 @@ async function boot() {
     $("bc-pick").value = barcodeId;
     renderLog();
   };
-
-  const previewEnv = () => {
-    $("v-t").textContent = (+$("t_c").value).toFixed(1);
-    $("v-rh").textContent = $("rh").value;
-  };
-  const pushEnv = () => {
-    previewEnv();
-    api("/sim/env", { t_c: +$("t_c").value, rh: +$("rh").value });
-  };
-  $("t_c").oninput = previewEnv;
-  $("rh").oninput = previewEnv;
-  $("t_c").onchange = pushEnv;
-  $("rh").onchange = pushEnv;
 
   const guardedOrderOp = (btn, fn) => {
     btn.onclick = async () => {

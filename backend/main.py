@@ -70,7 +70,6 @@ clock = SimClock()
 # ---------------------------------------------------------------------------
 
 STATE = {
-    "env": {"t_c": 24.0, "rh": 52.0},
     "device": {"online": False, "state": "IDLE", "count_beam": 0,
                "gross_g": 0.0, "stable": False, "last_seen_sim": -1e9,
                "last_seen_mono": -1e9, "source": "none"},
@@ -272,7 +271,6 @@ def snapshot() -> dict:
         "speed": clock.speed,
         "clock_label": clock.label(),
         "mode": STATE["mode"],
-        "env": STATE["env"],
         "device": dev,
         "mqtt": mq.ok,
         "banner": STATE["banner"],
@@ -332,11 +330,10 @@ def event(kind: str, payload: dict) -> None:
 # of main.py's HMI plumbing reads, exactly once, after the commit succeeds.
 
 def store_box(barcode_id: str, gross_g: float, source: str,
-             t_c: float | None = None, rh: float | None = None,
              fw: str | None = None, batch_id: str | None = None,
              vision: dict | None = None) -> dict:
     res = W.create_box(con, clock.t_sim, barcode_id, gross_g, source,
-                       t_c, rh, fw, batch_id=batch_id, vision=vision)
+                       fw, batch_id=batch_id, vision=vision)
     STATE["crane"] = {"cmd": "store", "box_id": res["box_id"],
                       "slot_id": res["slot"]["slot_id"] if res.get("slot") else None,
                       "seq": STATE["crane"]["seq"] + 1}
@@ -451,8 +448,6 @@ async def handle_box_done(payload: dict) -> None:
     barcode_id = payload["ref"]
     gross_g = float(payload.get("gross_g", 0.0))
     fw = payload.get("fw")
-    t_c = payload.get("t_c")
-    rh = payload.get("rh")
     fp = E.box_fingerprint(barcode_id, gross_g, fw)
     now_mono = time.monotonic()
 
@@ -474,7 +469,7 @@ async def handle_box_done(payload: dict) -> None:
 
     batch_id = _arrival_window.get("batch_id") if _arrival_window else None
     vision = _arrival_window.get("vision") if _arrival_window else None
-    res = store_box(barcode_id, gross_g, source="esp32", t_c=t_c, rh=rh, fw=fw,
+    res = store_box(barcode_id, gross_g, source="esp32", fw=fw,
                     batch_id=batch_id, vision=vision)
 
     if verdict["action"] == "resolve_window" and _arrival_window is not None:
@@ -502,8 +497,6 @@ async def loop_mqtt_in() -> None:
                     "last_seen_mono": time.monotonic(),
                     "source": payload.get("src", "esp32"),
                 })
-                if "t_c" in payload and payload["t_c"] is not None:
-                    STATE["env"] = {"t_c": payload["t_c"], "rh": payload["rh"]}
             elif topic == C.T_BOX_DONE:
                 await handle_box_done(payload)
         except Exception as exc:                        # pragma: no cover
@@ -588,8 +581,7 @@ async def run_arrival(barcode_id: str, qty: int, anomaly: str = "none",
         for f in frames:
             if _epoch != my_epoch:
                 return {"mode": "aborted", "reason": "reset during arrival"}
-            f = dict(f, t_c=STATE["env"]["t_c"], rh=STATE["env"]["rh"],
-                     t_sim=round(clock.t_sim, 1))
+            f = dict(f, t_sim=round(clock.t_sim, 1))
             mq.pub(C.T_RAW, f)
             STATE["device"]["source"] = "plant"
             await asyncio.sleep(1.0 / C.RAW_HZ)
@@ -607,7 +599,6 @@ async def run_arrival(barcode_id: str, qty: int, anomaly: str = "none",
         STATE["mode"] = "L1"
         gross = PLANT.final_gross_g(frames)
         res = store_box(barcode_id, gross, source="L1",
-                        t_c=STATE["env"]["t_c"], rh=STATE["env"]["rh"],
                         batch_id=batch_id, vision=vision)
         _arrival_window["status"] = "RESOLVED_L1"
         _arrival_window["resolved_at"] = time.monotonic()
@@ -699,16 +690,6 @@ async def api_clock(body: dict):
     return {"t_sim": clock.t_sim, "speed": clock.speed}
 
 
-@app.post("/api/sim/env")
-async def api_env(body: dict):
-    STATE["env"] = {"t_c": float(body.get("t_c", STATE["env"]["t_c"])),
-                    "rh": float(body.get("rh", STATE["env"]["rh"]))}
-    mq.pub(C.T_CMD, {"cmd": "env", **STATE["env"]})
-    event("env", STATE["env"])
-    await broadcast()
-    return STATE["env"]
-
-
 @app.post("/api/sim/arrival")
 async def api_arrival(body: dict):
     """The demo's main button: a registered box lands on the conveyor,
@@ -772,9 +753,7 @@ async def api_sim_box(body: dict):
             return JSONResponse({"error": "unknown ref: %s" % ref}, 400)
     bc = DB.one(con, "SELECT * FROM barcodes WHERE barcode_id=?", (barcode_id,))
     gross = C.TARE_G + qty * (bc["unit_mass_g"] if bc else 200.0)
-    res = store_box(barcode_id, gross, source="manual",
-                    t_c=STATE["env"]["t_c"], rh=STATE["env"]["rh"],
-                    batch_id=batch_id)
+    res = store_box(barcode_id, gross, source="manual", batch_id=batch_id)
     await broadcast()
     return {k: v for k, v in res.items() if k != "slot"}
 
@@ -807,7 +786,6 @@ async def api_raw(body: dict):
     """Direct raw injection (used by the 3D twin / manual sliders)."""
     mq.pub(C.T_RAW, {"beam": int(body.get("beam", 1)),
                      "load_mv": int(body.get("load_mv", 0)),
-                     "t_c": STATE["env"]["t_c"], "rh": STATE["env"]["rh"],
                      "t_sim": round(clock.t_sim, 1)})
     return {"ok": True}
 
@@ -947,7 +925,6 @@ async def api_reset(body: dict | None = None):
 
     clock.t_sim = C.CLOCK_START_SIM
     clock.speed = C.DEFAULT_SPEED
-    STATE["env"] = {"t_c": 24.0, "rh": 52.0}
     STATE["last_order"] = None
     STATE["banner"] = {"kind": "ok", "text": "Systeme reinitialise", "t_sim": 0.0}
     STATE["crane"] = {"cmd": "idle", "box_id": None, "slot_id": None,
@@ -979,7 +956,6 @@ async def api_scenario(body: dict):
         result = W.load_demo_scenario(con)
         clock.t_sim = result["t_sim"]
         clock.speed = result["speed"]
-        STATE["env"] = {"t_c": 22.0, "rh": 45.0}
         STATE["last_order"] = None
         STATE["crane"] = {"cmd": "idle", "box_id": None, "slot_id": None,
                           "seq": STATE["crane"]["seq"]}
@@ -1010,8 +986,6 @@ async def ws_endpoint(ws: WebSocket):
             if msg.get("type") == "raw":
                 mq.pub(C.T_RAW, {"beam": msg.get("beam", 1),
                                  "load_mv": msg.get("load_mv", 0),
-                                 "t_c": STATE["env"]["t_c"],
-                                 "rh": STATE["env"]["rh"],
                                  "t_sim": round(clock.t_sim, 1)})
     except WebSocketDisconnect:
         pass

@@ -63,7 +63,6 @@ try:
     time.sleep(2.0)   # let it connect and subscribe before the first arrival
 
     call("/api/reset", {})
-    call("/api/sim/env", {"t_c": 24.0, "rh": 45.0})
 
     CASES = [
         # (anomaly, expect_mode, expect_state)

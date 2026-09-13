@@ -124,7 +124,7 @@ Three rules that will save you time when a query result looks "wrong":
 
 1. **There are no wall-clock timestamps anywhere.** `t_in_sim`, `ready_at_sim`, `created_sim`, `t_sim`, `lock_expires_sim` are all simulated seconds from `backend/config.py::CLOCK_START_SIM`, not `datetime.now()`. Don't try to correlate them with real time. (`meta`'s clock checkpoint and device-liveness checks use `time.monotonic()` in backend runtime memory only — never a value that lands in one of these columns.)
 2. **A pick is partial FIFO** (contract 1.7, reversing 1.3) — `take` is only what the demand still needs from that box, so confirming a reservation usually leaves the last box picked `READY` with cores still in it, `t_in_sim` unchanged (only the box that was already down to exactly the remaining need, or fully consumed, ends up `EMPTY`). `algo/engine.py::fifo_allocate`/`apply_pick` generate and apply this directly now — a query expecting every confirm to empty every box it touched is checking a rule that no longer holds.
-3. `required_cure_h` is `24.0` on every box, unconditionally — there is no adaptive model in this system (contract 1.2). `t_c`/`rh` on a box are arrival evidence, not an input to anything.
+3. `required_cure_h` is `24.0` on every box, unconditionally — there is no adaptive model in this system (contract 1.2), and no climate sensor left to feed one even in principle (contract 1.8 removed the DHT22).
 4. `IN_PRODUCTION` (contract 1.6) only happens when the ENTIRE pipeline for a reference — including boxes still `DRYING` or `RESERVED`, not just currently-free ones — can't cover a demand. If enough already exists somewhere, just not free yet, the order stays the ordinary `IMPOSSIBLE` refusal it always was. `backend/warehouse.py::reserve` makes that call; `boxes.batch_id` (not `orders.payload.picks`, which stays empty for a batch) is the authoritative link between a batch order and what was produced for it. A box tagged to one batch is never visible to a different demand's `fifo_allocate` call (contract 1.7) — it is not general stock.
 5. Quarantine is not necessarily final (contract 1.7): `POST /api/box/{id}/archive` closes a `QUARANTINE`/`EMPTY` box out for good, and `POST /api/box/{id}/recount` re-presents a `QUARANTINE` box's evidence (a re-weigh, optionally a fresh vision reading) and, on success, sends it back through `DRYING` from `t_in_sim = now` — same barcode, same physical box, no second row created for it.
 
@@ -180,7 +180,7 @@ SELECT * FROM events ORDER BY id DESC LIMIT 20;          -- recent activity
 ```
 
 Don't `UPDATE`/`DELETE` by hand while the backend is running — it has no
-idea you touched the file and its in-memory `STATE` (env, crane, clock) will
+idea you touched the file and its in-memory `STATE` (crane, clock) will
 drift from what's on disk. `backend/db.py::transaction()` opens with `BEGIN
 IMMEDIATE`, so a hand-run `UPDATE`/`DELETE` that overlaps a backend write
 will simply block until the backend's transaction commits (WAL mode allows

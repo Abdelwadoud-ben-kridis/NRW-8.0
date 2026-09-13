@@ -3,7 +3,7 @@
  * Runs identically on Wokwi and on the real breadboard (P5's rig).
  *
  * The board receives RAW signals only:
- *    scw/<SESSION>/sim/raw   { load_mv, t_c, rh, t_sim, final? }
+ *    scw/<SESSION>/sim/raw   { load_mv, t_sim, final? }
  * and derives everything itself: tare, stability detection and mass
  * reporting. It is never told the answer -- identification (which
  * reference) and the second, independent count come from a barcode scan
@@ -32,15 +32,20 @@
  * barcode currently being weighed, the live gross mass, and the board's own
  * state -- a juror can watch the ESP32 work without staring at Serial.
  *
- * Libraries (Wokwi -> Library Manager, add these five):
- *    PubSubClient · ArduinoJson · DHT sensor library · Adafruit GFX Library
- *    · Adafruit SSD1306
+ * No temperature/humidity sensor: an earlier draft fed a DHT22 reading into
+ * an adaptive cure-time model, but the CDC asks for a fixed 24 h cure for
+ * every box regardless of climate (contract 1.2), so that sensor had
+ * nothing left to do once the adaptive model was dropped -- it was just
+ * publishing numbers nothing ever acted on. Removed rather than kept as
+ * decoration (contract 1.8).
+ *
+ * Libraries (Wokwi -> Library Manager, add these four):
+ *    PubSubClient · ArduinoJson · Adafruit GFX Library · Adafruit SSD1306
  */
 
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
-#include <DHT.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -61,13 +66,11 @@ const float G_PER_MV = 30000.0f / 3300.0f;   // 9.0909 g per mV
 #define PIN_POT   34
 #define PIN_DONE  26
 #define PIN_LED    2
-#define PIN_DHT   15
 
 #define OLED_W  128
 #define OLED_H  64
 #define OLED_ADDR 0x3C
 
-DHT dht(PIN_DHT, DHT22);
 WiFiClient net;
 PubSubClient mqtt(net);
 Adafruit_SSD1306 oled(OLED_W, OLED_H, &Wire, -1);
@@ -86,7 +89,6 @@ bool     g_stable   = false;
 bool     g_sawFinal = false;          // conveyor said "crate has left the station"
 uint32_t g_stableMs = 0;
 float    g_lastMass = 0;
-float    g_t_c = 24.0, g_rh = 52.0;
 
 // Weight is the ONLY sensor on this board (contract 1.5/1.7) -- the second
 // count and the reference identity come from a barcode scan and a simulated
@@ -106,9 +108,7 @@ void publishBoxDone() {
   StaticJsonDocument<256> d;
   d["ref"]        = g_ref;
   d["gross_g"]    = g_gross_g;
-  d["t_c"]        = g_t_c;
-  d["rh"]         = g_rh;
-  d["fw"]         = "1.1";
+  d["fw"]         = "1.2";
   char buf[256];
   serializeJson(d, buf);
   mqtt.publish(T_BOX_DONE, buf);
@@ -146,8 +146,6 @@ void publishTelemetry() {
   d["state"]      = g_counting ? (g_stable ? "STABILIZING" : "COUNTING") : "IDLE";
   d["gross_g"]    = g_gross_g;
   d["stable"]     = g_stable;
-  d["t_c"]        = g_t_c;
-  d["rh"]         = g_rh;
   d["up_ms"]      = millis();
   d["src"]        = "esp32";
   char buf[256];
@@ -200,7 +198,6 @@ void onMessage(char* topic, byte* payload, unsigned int len) {
   if (deserializeJson(d, payload, len)) return;
 
   if (String(topic) == T_RAW) {
-    if (d.containsKey("t_c")) { g_t_c = d["t_c"]; g_rh = d["rh"]; }
     onRaw((float)(d["load_mv"] | 0), d["final"] | false);
   } else if (String(topic) == T_CMD) {
     String c = d["cmd"] | "";
@@ -229,7 +226,6 @@ void setup() {
   Serial.begin(115200);
   pinMode(PIN_DONE, INPUT_PULLUP);
   pinMode(PIN_LED, OUTPUT);
-  dht.begin();
 
   Wire.begin();                           // default ESP32 I2C: SDA=21, SCL=22
   g_oledOk = oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
@@ -255,7 +251,7 @@ void setup() {
   resetBox();
 }
 
-uint32_t tTel = 0, tDht = 0, tOled = 0;
+uint32_t tTel = 0, tOled = 0;
 int lastDoneBtn = HIGH;
 
 void loop() {
@@ -277,13 +273,6 @@ void loop() {
     publishBoxDone();                     // force the box closed right now
   }
   lastDoneBtn = bDone;
-
-  if (millis() - tDht > 2500) {           // real T/RH -> the innovation input
-    tDht = millis();
-    float t = dht.readTemperature(), h = dht.readHumidity();
-    if (!isnan(t)) g_t_c = t;
-    if (!isnan(h)) g_rh = h;
-  }
 
   if (millis() - tTel > 500) { tTel = millis(); publishTelemetry(); }
   if (millis() - tOled > 300) { tOled = millis(); updateDisplay(); }

@@ -128,15 +128,6 @@
       <select id="ano"></select>
       <button class="primary" id="btn-arrive"></button>
       <button class="textlink" id="btn-quick"></button>
-
-      <h2 id="h-env"></h2>
-      <div class="row">
-        <div><label><span id="l-temp"></span> <b id="v-t">24.0</b> °C</label>
-          <input type="range" id="t_c" min="8" max="40" step="0.5" value="24"></div>
-        <div><label><span id="l-hum"></span> <b id="v-rh">52</b> %</label>
-          <input type="range" id="rh" min="20" max="95" step="1" value="52"></div>
-      </div>
-      <div class="notice" id="env-notice"></div>
     </div>
   </div>
 
@@ -151,8 +142,7 @@
   </div>
 
   <!-- ============================================================
-       LEFT COLUMN — live operation, ESP32, environment, curing,
-       crane, quarantine
+       LEFT COLUMN — live operation, ESP32, curing, crane, quarantine
        ============================================================ -->
   <div id="left">
     <div class="card" id="stagecard">
@@ -183,12 +173,8 @@
     </div>
 
     <div class="card">
-      <h2 id="h-env2"></h2>
-      <div class="envrow">
-        <div class="envmetric"><div class="v" id="env-t">—</div><div class="k" id="env-t-k"></div></div>
-        <div class="envmetric"><div class="v" id="env-rh">—</div><div class="k" id="env-rh-k"></div></div>
-      </div>
-      <div class="cureline"><span id="l-cure"></span> <b id="v-cure">24.0 h</b></div>
+      <h2 id="h-cure"></h2>
+      <div class="cureline"><b id="v-cure">24.0 h</b></div>
     </div>
 
     <div class="card">

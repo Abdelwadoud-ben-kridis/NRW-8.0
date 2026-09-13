@@ -35,7 +35,6 @@ STABLE_BAND_G = 25.0
 class FakeEsp32:
     def __init__(self) -> None:
         self.reset()
-        self.t_c, self.rh = 24.0, 52.0
         self.ref = "NY-114"
 
     def reset(self) -> None:
@@ -87,7 +86,7 @@ class FakeEsp32:
             return
         self.done_sent = True
         payload = {"ref": self.ref, "gross_g": round(self.gross_g, 1),
-                   "t_c": self.t_c, "rh": self.rh, "fw": "fake-1.1"}
+                   "fw": "fake-1.2"}
         client.publish(C.T_BOX_DONE, json.dumps(payload))
         print("[box_done] %s" % payload)
         self.reset()
@@ -97,7 +96,7 @@ class FakeEsp32:
             "state": ("STABILIZING" if self.stable else
                       "COUNTING" if self.tared else "IDLE"),
             "gross_g": round(self.gross_g, 1),
-            "stable": self.stable, "t_c": self.t_c, "rh": self.rh,
+            "stable": self.stable,
             "up_ms": int(time.monotonic() * 1000), "src": "fake"})
 
 
@@ -116,8 +115,6 @@ def on_message(client, _u, msg):
     except Exception:
         return
     if msg.topic == C.T_RAW:
-        if d.get("t_c") is not None:
-            dev.t_c, dev.rh = d["t_c"], d["rh"]
         dev.on_raw(float(d.get("load_mv", 0)), bool(d.get("final", False)), client)
     elif msg.topic == C.T_CMD:
         cmd = d.get("cmd")

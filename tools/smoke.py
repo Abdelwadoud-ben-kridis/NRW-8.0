@@ -35,7 +35,6 @@ def check(name, cond, extra=""):
 print("smoke test against", BASE)
 call("/api/reset", {})
 call("/api/clock", {"speed": 0})
-call("/api/sim/env", {"t_c": 24.0, "rh": 45.0})   # -> cure is exactly the 24 h floor
 
 # 1. two boxes of the same ref arrive 5 simulated hours apart
 call("/api/sim/box", {"ref": "NY-114", "qty": 22})
@@ -91,20 +90,20 @@ check("BOX-2 keeps its remainder, still slotted",
 # 6. quarantine path
 call("/api/reset", {})
 art = [a for a in call("/api/articles") if a["ref"] == "NY-114"][0]
-call("/api/sim/env", {"t_c": 24.0, "rh": 52.0})
 res = call("/api/sim/arrival", {"ref": "NY-114", "qty": 30, "anomaly": "mismatch"})
 st = call("/api/state")
 check("anomaly box quarantined",
       any(b["state"] == "QUARANTINE" for b in st["boxes"]),
       [b["state"] for b in st["boxes"]])
 
-# 7. contract 1.2: cure is FIXED at 24 h regardless of climate (no adaptive
-# model -- the CDC never asked for one; T/RH are evidence-only now)
+# 7. contract 1.2: cure is FIXED at 24 h, unconditionally (no adaptive
+# model -- the CDC never asked for one, and there is no longer even a
+# climate input in this system to vary -- the DHT22 that used to feed one
+# was removed in contract 1.8)
 call("/api/reset", {})
-call("/api/sim/env", {"t_c": 15.0, "rh": 85.0})   # a cold, humid room
 call("/api/sim/box", {"ref": "NY-220", "qty": 20})
 st = call("/api/state")
-check("cure is exactly 24h even in a cold/humid room",
+check("cure is exactly 24h",
       abs(st["boxes"][0]["required_cure_h"] - 24.0) < 0.01,
       st["boxes"][0]["required_cure_h"])
 
@@ -113,7 +112,6 @@ check("event log populated", len(call("/api/events?limit=50")) > 0)
 
 # 9. double confirm deducts exactly once (finding F1)
 call("/api/reset", {})
-call("/api/sim/env", {"t_c": 24.0, "rh": 45.0})
 call("/api/sim/box", {"ref": "NY-114", "qty": 40})
 call("/api/clock", {"jump_h": 25})
 time.sleep(0.4)
@@ -131,7 +129,6 @@ check("qty deducted exactly once", box1["qty_available"] == 30, box1["qty_availa
 
 # confirming a cancelled order is refused, not silently applied
 call("/api/reset", {})
-call("/api/sim/env", {"t_c": 24.0, "rh": 45.0})
 call("/api/sim/box", {"ref": "NY-114", "qty": 40})
 call("/api/clock", {"jump_h": 25})
 time.sleep(0.4)
@@ -146,7 +143,6 @@ except Exception:
 # 10. reservation expiry cancels the ORDER too, not just the box lock
 # (finding F4) -- LOCK_TTL_H (backend/config.py) is 2.0 sim-h
 call("/api/reset", {})
-call("/api/sim/env", {"t_c": 24.0, "rh": 45.0})
 call("/api/sim/box", {"ref": "NY-114", "qty": 40})
 call("/api/clock", {"jump_h": 25})
 time.sleep(0.4)

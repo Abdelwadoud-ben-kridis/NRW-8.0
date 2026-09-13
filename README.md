@@ -170,10 +170,10 @@ scw/
 │                           separate CAD project can export them (§5)
 ├── firmware/
 │   ├── sketch.ino          ESP32 — same file for Wokwi and the real board
-│   ├── diagram.json        Wokwi wiring — pot (load cell stand-in), DHT22,
-│   │                       an SSD1306 OLED status display, done button
-│   └── libraries.txt       PubSubClient · ArduinoJson · DHT sensor library ·
-│                           Adafruit GFX Library · Adafruit SSD1306
+│   ├── diagram.json        Wokwi wiring — pot (load cell stand-in), an
+│   │                       SSD1306 OLED status display, done button
+│   └── libraries.txt       PubSubClient · ArduinoJson · Adafruit GFX
+│                           Library · Adafruit SSD1306
 └── tools/
     ├── fake_device.py          Python ESP32 stand-in, byte-identical payloads
     ├── smoke.py                REST end-to-end checks against a running backend
@@ -240,7 +240,7 @@ at the part's own mounting point.
 1. Open [wokwi.com](https://wokwi.com) → new ESP32 project.
 2. Paste `firmware/diagram.json` into the **diagram.json** tab.
 3. Paste `firmware/sketch.ino` into **sketch.ino**.
-4. Library Manager → add the five from `libraries.txt`.
+4. Library Manager → add the four from `libraries.txt`.
 5. Check `SESSION` matches `backend/config.py`. Start the simulation.
 6. The ESP32 pill in the dashboard turns green, and the OLED shows
    `SCW booting...` then `TARE...`. Press **A**.
@@ -354,9 +354,10 @@ reverse, because 55 of the 160 points are things the jury has to *see happen*.
   a walkable aisle.
 - Worst-case crane cycle is about 10 s at 1.2 m/s travel and 0.8 m/s lift, with
   an S-curve profile because pre-cure cores break if you handle them roughly.
-- The cure requirement is a fixed 24 h for every box, every reference, every
-  climate (contract 1.2) — no adaptive model. Temperature/RH are recorded on
-  each box as arrival evidence and shown on the HMI, but never computed with.
+- The cure requirement is a fixed 24 h for every box, every reference — no
+  adaptive model (contract 1.2), and no climate sensor left in the system
+  to feed one even in principle (contract 1.8 removed the DHT22 that used
+  to feed the dropped adaptive model, since it had nothing left to do).
 - Two independent counts (the scale, and the simulated vision station).
   Agreement → HAUTE. A gap of one or two → accepted at the lower figure,
   MOYENNE. A gap of three or more, or vision naming a different reference
