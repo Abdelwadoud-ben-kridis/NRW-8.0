@@ -120,14 +120,58 @@ def test_mismatch_is_quarantined_regardless_of_quantity():
 def test_vision_agreement_rescues_a_noisy_but_honest_box():
     # A large, real box drifts past the tight zero-vision tolerance on
     # honest per-core variance alone (finding: 25-60% of good boxes at
-    # realistic noise) -- an independent vision count that agrees within one
-    # core RESCUES it instead of quarantining a perfectly good box.
-    unit = 206.0
-    count = 40
-    noisy_gross = E.TARE_G + count * unit * 1.02   # +2% -- outside 0.12*unit alone
-    r = E.assess_box(BARCODE, ART, noisy_gross, vision_ref="NY-114", vision_count=count)
-    assert r["accepted"] and r["confidence"] == "MOYENNE"
-    assert r["quantity"] == count
+    # realistic noise). With a vision count that agrees (camera one core
+    # short -- ordinary occlusion), a residual inside the box-size noise
+    # band is a confident, correct count, not a quarantine and not an
+    # undercount (contract 1.10).
+    noisy_gross = E.TARE_G + 40 * 206.0 + 60.0     # 60 g off: outside 0.12*unit
+    r = E.assess_box(BARCODE, ART, noisy_gross, vision_ref="NY-114", vision_count=39)
+    assert r["accepted"] and r["confidence"] == "HAUTE", r
+    assert r["quantity"] == 40, r
+
+
+def test_residual_beyond_the_noise_band_is_accepted_at_moyenne():
+    # A small box has a small noise band -- 60 g off on 5 cores is beyond
+    # what per-core variance explains, but vision agrees, so it is accepted
+    # at MOYENNE rather than guessed HAUTE or quarantined.
+    r = E.assess_box(BARCODE, ART, E.TARE_G + 5 * 206.0 + 60.0,
+                     vision_ref="NY-114", vision_count=5)
+    assert r["accepted"] and r["confidence"] == "MOYENNE" and r["quantity"] == 5, r
+
+
+def test_occlusion_never_turns_into_an_undercount():
+    # contract 1.10 finding: min(weight, vision) stored 8.8% of honest
+    # 37-core boxes as 36, because the camera only ever misses cores. Full
+    # plant pipeline, every reference, random quantities.
+    import random as _random
+    from backend import db as _db
+    from backend import plant as _plant
+    articles = [{"ref": r[0], "unit_mass_g": r[2], "tolerance_g": r[3],
+                "len_mm": r[4], "wid_mm": r[5], "h_mm": r[6], "holes": r[7]}
+               for r in _db.ARTICLES]
+    _random.seed(4321)
+    wrong = haute = n = 0
+    for _ in range(1500):
+        art = _random.choice(articles)
+        qty = _random.randint(1, 80)
+        bc = {"barcode_id": "BC-X", "ref": art["ref"], "unit_mass_g": art["unit_mass_g"]}
+        gross = _plant.final_gross_g(_plant.build_arrival(art["unit_mass_g"], qty, "none"))
+        vision = _plant.simulate_vision(art, qty, "none", articles)
+        idv = E.identify_core(vision, articles)
+        r = E.assess_box(bc, art, gross,
+                         vision_ref=idv["ref"] if idv["confidence"] != "NULLE" else None,
+                         vision_count=vision["count_visible"],
+                         vision_confidence=idv["confidence"])
+        if r["accepted"]:
+            n += 1
+            wrong += r["quantity"] != qty
+            haute += r["confidence"] == "HAUTE"
+    # The residual ~1% is pure weighing physics, not occlusion: 80 light
+    # NY-075 cores (88.5 g, 3% CV) spread +/-24 g against a 44 g rounding
+    # half-width, so the scale alone occasionally lands one core off. The
+    # old min(weight, vision) rule was ~9-10% wrong on the same pipeline.
+    assert wrong / n < 0.02, "%d/%d accepted with the wrong quantity" % (wrong, n)
+    assert haute / n > 0.85, "only %d/%d HAUTE" % (haute, n)
 
 
 def test_vision_and_weight_disagreeing_a_lot_is_quarantined():

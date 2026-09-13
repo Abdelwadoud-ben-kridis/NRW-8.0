@@ -16,6 +16,7 @@ box              a plastic crate holding N cores of one article.
 
 from __future__ import annotations
 
+import math
 import re
 
 # ---------------------------------------------------------------------------
@@ -217,15 +218,26 @@ def assess_box(barcode: dict, article: dict, gross_g: float,
        (`max(tol, 0.12*unit)`) is the only guard against a mismatched box,
        so it stays tight and unforgiving -- exactly the original,
        zero-vision behaviour, still what every call site that has no camera
-       reading gets. When a vision core-count IS available, a weight
-       reading that fails that tight tolerance is not necessarily wrong:
-       real per-core mass varies (~3% CV), so a large, honest box can drift
-       past a fixed absolute band on noise alone (finding: 25-60% of
-       otherwise-good boxes at realistic variance). The vision count is the
-       second, independent measurement that resolves the ambiguity --
-       agreeing with the weight count RESCUES an over-tolerance box at
-       MOYENNE confidence, using the lower of the two counts; disagreeing
-       by 2 or more is a real inconsistency, quarantined either way.
+       reading gets.
+
+       When a vision core-count IS available (contract 1.10):
+         - the WEIGHT count is the quantity. The camera's count is a LOWER
+           BOUND: occlusion can hide cores, it never invents them. (1.7-1.9
+           took min(weight, vision), which turned ordinary occlusion into a
+           systematic undercount -- 8.8% of honest 37-core boxes stored as
+           36.)
+         - the weight residual is judged against the statistical noise of a
+           box that size, `2.5 * sqrt((CV*unit)^2 * count + scale_noise^2)`
+           (never tighter than the zero-vision tolerance), since real
+           per-core mass varies ~3% and a large honest box drifts past a
+           fixed band on noise alone.
+         - residual inside that band AND the camera seeing 0-2 fewer cores
+           than the scale -> HAUTE. Anything else within 2 cores (residual
+           beyond the band, or the camera seeing MORE than the scale) ->
+           accepted at MOYENNE, quantity max(weight, vision).
+         - a gap of 3+ cores between the two sensors -> quarantine.
+       Identity is never judged by weight in this branch: a vision reference
+       that differs from the barcode has already quarantined the box above.
 
     Returns a dict ready to be written straight into the `boxes` row:
         {count_weight, quantity, confidence, accepted, state, reason,
@@ -288,26 +300,24 @@ def assess_box(barcode: dict, article: dict, gross_g: float,
                            % (count, int(vision_count))))
         return out
 
-    if weight_ok:
-        # The scale alone is already confident. A vision count within 2
-        # cores is ordinary occlusion noise, not a reason to distrust a
-        # clean weight reading -- this is what fixes the false-quarantine
-        # rate under realistic per-core mass variance without weakening the
-        # dedicated large-disagreement check above (finding: 25-60% of
-        # honest boxes were quarantined before vision existed to confirm
-        # them).
-        conf = "HAUTE" if not gap else "MOYENNE"
-        out.update(quantity=count, confidence=conf, accepted=True,
-                   state="STORING", reason=None)
-        return out
-
-    if gap is not None and gap <= 2:
-        # Weight alone failed its tight tolerance, but an independent
-        # camera count agrees closely -- accept the lower, more
-        # conservative figure at MOYENNE instead of quarantining a box two
-        # sensors mostly agree on.
-        out.update(quantity=min(count, int(vision_count)), confidence="MOYENNE",
-                   accepted=True, state="STORING", reason=None)
+    if gap is None:
+        if weight_ok:
+            # No camera: the scale alone, tight tolerance, confident.
+            out.update(quantity=count, confidence="HAUTE", accepted=True,
+                       state="STORING", reason=None)
+            return out
+    else:
+        # gap <= 2 here. See the docstring: weight count is the quantity,
+        # vision is a lower bound, residual judged against box-size noise.
+        occluded = count - int(vision_count)          # > 0: camera missed cores
+        sigma = math.sqrt((CORE_MASS_CV * unit) ** 2 * count + SCALE_NOISE_G ** 2)
+        band = max(id_tol, 2.5 * sigma)
+        if residual <= band and 0 <= occluded <= 2:
+            out.update(quantity=count, confidence="HAUTE", accepted=True,
+                       state="STORING", reason=None)
+        else:
+            out.update(quantity=max(count, int(vision_count)), confidence="MOYENNE",
+                       accepted=True, state="STORING", reason=None)
         return out
 
     # Weight failed tolerance and there is no vision reading to rescue it
