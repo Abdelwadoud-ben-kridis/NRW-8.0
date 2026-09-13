@@ -3,7 +3,42 @@
 Owner: **P3 (dashboard / backend / site)**. Everyone codes against this file.
 If you change it, announce it out loud and bump the version line.
 
-    CONTRACT VERSION: 1.2
+    CONTRACT VERSION: 1.4
+
+Changes from 1.3 (box_capacity enforcement, 2026-09-13):
+
+- **A crate cannot hold more cores than its declared `box_capacity`**
+  (§1.3, `algo/engine.py::assess_box`). An otherwise-accepted count above
+  capacity is now quarantined (reason `"quantite N superieure a la
+  capacite de la caisse (CAP)"`) instead of silently stored as one
+  oversized box. This runs after identification/quantity, so a
+  wrong-reference or counting-delta fault is still reported as that fault.
+- **`POST /api/sim/arrival` and `POST /api/sim/box` split an over-capacity
+  request into several right-sized crates** instead of ever reaching the
+  new capacity quarantine themselves (`backend/main.py::split_for_capacity`):
+  asking for 70 cores of a 69-capacity reference creates two boxes (69 + 1),
+  sequentially, the same as if two crates had physically arrived one after
+  the other. A real device's `box_done` is one physical crate and is never
+  split — if its own count exceeds capacity, that box is quarantined.
+
+Changes from 1.2 (whole-box allocation, 2026-09-13):
+
+- **FIFO allocation never splits a box** (§4, §6.7). A pick always takes a
+  candidate box's entire `qty_available`; there is no more partial `take`
+  out of `fifo_allocate`. Covering an order can therefore require rounding
+  up to the next whole box, so **`qty_allocated` may exceed
+  `qty_requested`** — that is expected, not a bug (`backend/consistency.py`
+  §O1 no longer flags it).
+- **Not enough whole-box stock refuses the whole reservation** (§4, §6.7).
+  If the total `qty_available` across every pickable box for `ref` is less
+  than `qty_requested`, `POST /api/demand` reserves nothing at all
+  (`status: "IMPOSSIBLE"`, `picks: []`) instead of handing out whatever was
+  available and reporting a shortfall. Every otherwise-pickable box still
+  appears in `rejected[]` with the new reason `"stock insuffisant"`, so the
+  jury sees a stock problem, not a state problem.
+- `apply_pick` (used by confirm) is unchanged and still technically supports
+  a partial take — but since `fifo_allocate` never generates one anymore,
+  confirming an order always empties every box it reserved.
 
 Changes from 1.1 (database/backend hardening pass, 2026-09-12):
 
@@ -277,6 +312,14 @@ Client → server (rare; most client actions go through REST):
 }
 ```
 
+Each `take` is always the picked box's **entire** `qty_available` (§6.7) —
+`fifo_allocate` never splits a box, so `qty_allocated` can land above
+`qty_requested` when the last whole box needed to cover the order is bigger
+than what was still missing. If the ref's total whole-box stock can't reach
+`qty_requested` at all, `picks` is `[]`, `status` is `"IMPOSSIBLE"`, and every
+otherwise-pickable box appears in `rejected[]` with reason
+`"stock insuffisant"` (detail: `"N disponible(s) au total pour M demande(s)"`).
+
 `reason`/`detail` are given here exactly as `algo/engine.py` emits them:
 unaccented ASCII, since that is also what `algo/test_engine.py` asserts on.
 `dashboard/app.js::tRej/tDet` translates them for display — do not expect
@@ -358,8 +401,11 @@ any other state is a 409. An expired reservation also lands on
    `BOX-2` sorts before `BOX-10`. Every place that orders boxes for FIFO
    purposes (allocation, the inventory table, the by-ref FIFO head) uses
    this same key.
-4. A partial pick returns the box to `READY` with **`t_in_sim` unchanged**.
-   Re-stamping it would silently break FIFO.
+4. `apply_pick` (confirm) supports a partial take in principle and returns
+   the box to `READY` with **`t_in_sim` unchanged** if it ever gets one —
+   re-stamping it would silently break FIFO. In practice this never fires
+   today, because rule 7 means `fifo_allocate` never generates a partial
+   take.
 5. `RESERVED` is a real lock with `lock_expires_sim`; expiry releases the
    box **and cancels its order** (`order_expired` event) — a lock running
    out never leaves a `PENDING` order pointing at boxes that already moved
@@ -368,6 +414,10 @@ any other state is a 409. An expired reservation also lands on
    on an order already in its target state is a no-op; applying either to
    an order in the wrong state is refused (409), never silently applied to
    whatever the boxes happen to be now.
+7. **A pick never splits a box** (contract 1.3): `take` is always a box's
+   whole `qty_available`. If the ref's total whole-box stock can't reach
+   `qty_requested`, the reservation is refused outright (`IMPOSSIBLE`,
+   `picks: []`) rather than reserving less than what was asked for.
 7. Every backend operation that touches more than one row runs inside one
    database transaction (`backend/db.py::transaction`, used throughout
    `backend/warehouse.py`) — a crash or a refused precondition leaves

@@ -237,8 +237,12 @@ def run_checks(con, now_sim: float | None = None) -> dict:
         plan = json.loads(o["payload"])
         if o["status"] == "IMPOSSIBLE" and plan.get("picks"):
             bad_picks.append(o["order_id"])
+        # qty_allocated CAN exceed qty_requested: boxes are never split, so
+        # covering an order sometimes means rounding up to the next whole
+        # box (algo/engine.py::fifo_allocate). What must never happen is the
+        # stored column disagreeing with the sum of the picks that back it.
         allocated = sum(p["take"] for p in plan.get("picks", []))
-        if allocated != o["qty_allocated"] or o["qty_allocated"] > o["qty_requested"]:
+        if allocated != o["qty_allocated"]:
             bad_qty.append(o["order_id"])
     checks.append(_row("O1", "PASS" if not (bad_status or bad_picks or bad_qty) else "FAIL",
                        "order status/qty/picks are internally consistent"

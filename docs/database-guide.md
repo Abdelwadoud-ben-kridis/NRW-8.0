@@ -105,7 +105,7 @@ not a bug. See `algo/engine.py`'s `PERSISTED_STATES` / `_TRANSITIONS`.
 Three rules that will save you time when a query result looks "wrong":
 
 1. **There are no wall-clock timestamps anywhere.** `t_in_sim`, `ready_at_sim`, `created_sim`, `t_sim`, `lock_expires_sim` are all simulated seconds from `backend/config.py::CLOCK_START_SIM`, not `datetime.now()`. Don't try to correlate them with real time. (`meta`'s clock checkpoint and device-liveness checks use `time.monotonic()` in backend runtime memory only — never a value that lands in one of these columns.)
-2. A **partial pick** returns a box to `READY` with `t_in_sim` unchanged (re-stamping it would silently break FIFO) — so `t_in_sim` is "when this box first arrived", not "when it was last touched."
+2. **A pick never splits a box** (contract 1.3) — `take` is always a box's whole `qty_available`, so confirming a reservation always leaves the box `EMPTY`, never a partially-drained `READY`. (`apply_pick`/the RESERVED→READY arrow above still exist for a hypothetical partial take and would keep `t_in_sim` unchanged if one ever occurred, but `algo/engine.py::fifo_allocate` no longer generates one.)
 3. `required_cure_h` is `24.0` on every box, unconditionally — there is no adaptive model in this system (contract 1.2). `t_c`/`rh` on a box are arrival evidence, not an input to anything.
 
 ---

@@ -247,8 +247,9 @@ python tools/mqtt_probe.py      # MQTT-layer dedup/malformed-payload checks,
 `smoke.py` walks the exact demo path: two boxes arrive five simulated hours
 apart, a demand before curing is refused **with reasons**, the clock jumps, the
 boxes cure on their own (always exactly 24 h — contract 1.2, no adaptive
-model), FIFO allocates across two boxes oldest-first, a partial pick keeps
-`t_in_sim` unchanged, the emptied box releases its slot, an injected anomaly
+model), FIFO allocates across two boxes oldest-first, rounding up to both
+whole boxes rather than splitting one (contract 1.3 — a box is never left
+half-picked), both emptied boxes release their slots, an injected anomaly
 lands in quarantine, a double confirm deducts exactly once, an expired
 reservation cancels its order, an unknown reference is quarantined without
 polluting a real article, and the read-only consistency checker

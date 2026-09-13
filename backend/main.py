@@ -465,6 +465,25 @@ async def loop_mqtt_in() -> None:
             print("[loop_mqtt_in] error handling %s (continuing): %s" % (topic, exc))
 
 
+def split_for_capacity(ref: str, qty: int) -> list[int]:
+    """A physical crate can't hold more cores than its declared
+    box_capacity: "70 arrived" for a 69-capacity reference means two crates
+    showed up (69 + 1), not one 70-count crate (algo.engine.assess_box
+    quarantines that as an overloaded crate if it ever reaches it as one
+    request). Simulated/manual arrivals are the one place that CAN split
+    a big ask into several right-sized crates before it gets there.
+    """
+    art = DB.one(con, "SELECT box_capacity FROM articles WHERE ref=?", (ref,))
+    cap = int(art["box_capacity"]) if art and art["box_capacity"] else 0
+    if cap <= 0 or qty <= cap:
+        return [qty]
+    chunks, remaining = [], qty
+    while remaining > 0:
+        chunks.append(min(cap, remaining))
+        remaining -= cap
+    return chunks
+
+
 async def run_arrival(ref: str, qty: int, anomaly: str = "none") -> dict:
     """Play one box arrival through the plant model, at 10 Hz.
 
@@ -618,24 +637,40 @@ async def api_env(body: dict):
 
 @app.post("/api/sim/arrival")
 async def api_arrival(body: dict):
-    """The demo's main button: a box lands on the conveyor."""
+    """The demo's main button: a box lands on the conveyor.
+
+    A qty over the reference's box_capacity plays out as SEVERAL sequential
+    arrivals (one per crate) rather than one oversized box (split_for_capacity).
+    """
     ref = body.get("ref") or DB.ARTICLES[0][0]
     qty = int(body.get("qty", 37))
     anomaly = body.get("anomaly", "none")
-    res = await run_arrival(ref, qty, anomaly)
+    chunks = split_for_capacity(ref, qty)
+    res = {}
+    for chunk_qty in chunks:
+        res = await run_arrival(ref, chunk_qty, anomaly)
+        if res.get("mode") == "aborted":
+            break
     await broadcast()
+    if len(chunks) > 1:
+        res = {**res, "boxes": len(chunks), "split_qty": chunks}
     return res
 
 
 @app.post("/api/sim/box")
 async def api_sim_box(body: dict):
-    """L1 shortcut: create a box with no plant model and no ESP32 at all."""
+    """L1 shortcut: create a box with no plant model and no ESP32 at all.
+
+    Same capacity split as /api/sim/arrival -- see split_for_capacity.
+    """
     ref = body.get("ref") or DB.ARTICLES[0][0]
     qty = int(body.get("qty", 37))
     art = DB.one(con, "SELECT * FROM articles WHERE ref=?", (ref,))
-    gross = C.TARE_G + qty * (art["unit_mass_g"] if art else 200.0)
-    res = store_box(ref, qty, gross, source="manual",
-                    t_c=STATE["env"]["t_c"], rh=STATE["env"]["rh"])
+    res = {}
+    for chunk_qty in split_for_capacity(ref, qty):
+        gross = C.TARE_G + chunk_qty * (art["unit_mass_g"] if art else 200.0)
+        res = store_box(ref, chunk_qty, gross, source="manual",
+                        t_c=STATE["env"]["t_c"], rh=STATE["env"]["rh"])
     await broadcast()
     return {k: v for k, v in res.items() if k != "slot"}
 

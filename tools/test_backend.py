@@ -105,7 +105,10 @@ def test_double_confirm_deducts_once():
         check("first confirm applies", r1["already"] is False)
         check("second confirm is a no-op", r2["already"] is True)
         row = DB.one(con, "SELECT * FROM boxes WHERE box_id='BOX-1'")
-        check("qty deducted exactly once", row["qty_available"] == 30, row["qty_available"])
+        # the whole box is taken (never split), so one confirm empties it;
+        # the point of this test is that the SECOND confirm doesn't try to
+        # deduct another 40 and drive qty_available negative
+        check("qty deducted exactly once", row["qty_available"] == 0, row["qty_available"])
         assert_pass(con, 100 * H, "double confirm")
     finally:
         cleanup(con)
@@ -178,18 +181,39 @@ def test_reservation_expiry_cancels_order_and_releases_box():
         cleanup(con)
 
 
-def test_partial_pick_keeps_fifo_position():
+def test_whole_box_pick_overshoots_and_empties_the_box():
+    # A box is never split (contract 1.3): reserving 10 out of a 40-core box
+    # takes the WHOLE box, overshooting qty_requested, rather than leaving
+    # 30 cores stranded in a half-picked crate.
     con = fresh_con()
     try:
         W.create_box(con, 0.0, "NY-114", 40, C.TARE_G + 40 * 206.0, "test")
         DB.update(con, "boxes", "box_id", "BOX-1", {"state": "READY"})
         plan = W.reserve(con, 100 * H, "NY-114", 10)
+        check("rounds up to the whole box (40, not 10)", plan["qty_allocated"] == 40)
         W.confirm(con, 100 * H, plan["order_id"])
         box = DB.one(con, "SELECT * FROM boxes WHERE box_id='BOX-1'")
-        check("partial pick -> READY", box["state"] == "READY")
-        check("t_in_sim unchanged", box["t_in_sim"] == 0.0)
-        check("qty reduced", box["qty_available"] == 30)
-        assert_pass(con, 100 * H, "partial pick")
+        check("box fully emptied, not split", box["state"] == "EMPTY")
+        check("slot released", box["slot_id"] is None)
+        assert_pass(con, 100 * H, "whole-box pick")
+    finally:
+        cleanup(con)
+
+
+def test_insufficient_stock_reserves_nothing():
+    # Only 5 whole-box cores exist; asking for 40 must refuse the whole
+    # reservation instead of locking those 5 and reporting a shortfall.
+    con = fresh_con()
+    try:
+        W.create_box(con, 0.0, "NY-114", 5, C.TARE_G + 5 * 206.0, "test")
+        DB.update(con, "boxes", "box_id", "BOX-1", {"state": "READY"})
+        plan = W.reserve(con, 100 * H, "NY-114", 40)
+        check("order is IMPOSSIBLE", plan["status"] == "IMPOSSIBLE")
+        check("nothing allocated", plan["qty_allocated"] == 0)
+        box = DB.one(con, "SELECT * FROM boxes WHERE box_id='BOX-1'")
+        check("box untouched, still READY", box["state"] == "READY")
+        check("box not locked", box["locked_by"] is None)
+        assert_pass(con, 100 * H, "insufficient stock")
     finally:
         cleanup(con)
 

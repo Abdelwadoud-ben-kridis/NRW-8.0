@@ -142,6 +142,12 @@ def assess_box(article: dict, count_beam: int, gross_g: float,
         |A-B| == 0  -> ACCEPTED, qty = A,          confidence HAUTE
         |A-B| == 1  -> ACCEPTED, qty = min(A,B),   confidence MOYENNE
         |A-B| >= 2  -> QUARANTINE, counting fault
+        otherwise-accepted qty > article's box_capacity -> QUARANTINE,
+            overloaded crate (a crate cannot physically hold more cores than
+            its declared capacity; simulated/manual arrivals that ask for
+            more than one crate's worth are the CALLER's job to split into
+            several boxes before this ever sees them -- see
+            backend/main.py::split_for_capacity)
 
     Honest limitation: for a very light reference, a mislabelled crate can
     land near a multiple of the declared unit mass by coincidence. It is then
@@ -202,6 +208,17 @@ def assess_box(article: dict, count_beam: int, gross_g: float,
                    state="QUARANTINE",
                    reason="ecart de comptage = %d (barriere %d / pesee %d)"
                           % (delta, count_beam, count_weight))
+        return out
+
+    # --- CAPACITY --------------------------------------------------------------
+    # A crate cannot physically hold more cores than its declared capacity.
+    # This runs after identification/quantity so a wrong-reference or
+    # counting fault is still reported as that fault, not masked by this one.
+    capacity = int(article.get("box_capacity") or 0)
+    if capacity > 0 and out["quantity"] > capacity:
+        out.update(accepted=False, state="QUARANTINE",
+                   reason="quantite %d superieure a la capacite de la caisse (%d)"
+                          % (out["quantity"], capacity))
     return out
 
 
@@ -255,16 +272,26 @@ def fifo_allocate(boxes: list, ref: str, qty: int, now_sim: float,
     `boxes` = every box currently in the warehouse (any ref, any state).
     Returns the contract shape documented in docs/contracts.md section 4.
 
+    Boxes are shipped WHOLE, never split: a pick always takes a candidate
+    box's entire qty_available, so a box can never be left half-consumed
+    (contract 1.3). Because of that, `qty_allocated` may legitimately exceed
+    `qty_requested` -- covering an order can require rounding up to the next
+    whole box. And because a box can't be split to make up a shortfall, the
+    total WHOLE-box stock for `ref` must already cover `qty` before anything
+    is reserved: if it doesn't, nothing is picked at all (status IMPOSSIBLE)
+    rather than silently handing out less than what was asked for.
+
     The REJECTED list is the deliverable. Anyone can sort a list by date; what
     convinces a jury is showing, per box, the reason it was passed over.
     """
-    picks, rejected = [], []
-    remaining = int(qty)
+    rejected = []
+    needed = int(qty)
 
     candidates = [b for b in boxes if b["article_ref"] == ref]
     # deterministic FIFO key: oldest stored first, numeric box_id breaks ties
     candidates.sort(key=fifo_key)
 
+    pickable = []
     for b in candidates:
         state = b["state"]
 
@@ -302,25 +329,47 @@ def fifo_allocate(boxes: list, ref: str, qty: int, now_sim: float,
                              "detail": "0 noyau", "t_in_sim": b["t_in_sim"]})
             continue
 
-        if remaining <= 0:
+        pickable.append(b)
+
+    total_avail = sum(int(b["qty_available"]) for b in pickable)
+
+    if total_avail < needed:
+        # Not enough WHOLE boxes to cover the request -- refuse the whole
+        # reservation instead of reserving whatever is available. Every
+        # otherwise-pickable box still shows up in `rejected`, so the jury
+        # sees a stock problem, not a state problem.
+        for b in pickable:
+            rejected.append({
+                "box_id": b["box_id"], "reason": "stock insuffisant",
+                "detail": "%d disponible(s) au total pour %d demande(s)"
+                          % (total_avail, needed),
+                "t_in_sim": b["t_in_sim"]})
+        return {
+            "order_id": order_id, "ref": ref, "qty_requested": needed,
+            "qty_allocated": 0, "shortfall": needed,
+            "picks": [], "rejected": rejected, "status": "IMPOSSIBLE",
+        }
+
+    picks = []
+    taken = 0
+    for b in pickable:
+        if taken >= needed:
             rejected.append({"box_id": b["box_id"], "reason": "plus recent (FIFO)",
-                             "detail": "besoin deja couvert par des box plus anciens",
+                             "detail": "besoin deja couvert par des box plus anciennes",
                              "t_in_sim": b["t_in_sim"]})
             continue
-
-        take = min(avail, remaining)
-        remaining -= take
+        avail = int(b["qty_available"])
         picks.append({"box_id": b["box_id"], "slot_id": b.get("slot_id"),
-                      "take": take, "t_in_sim": b["t_in_sim"],
-                      "rank": len(picks) + 1,
-                      "partial": take < avail})
+                      "take": avail, "t_in_sim": b["t_in_sim"],
+                      "rank": len(picks) + 1, "partial": False})
+        taken += avail
 
     return {
         "order_id": order_id,
         "ref": ref,
-        "qty_requested": int(qty),
-        "qty_allocated": int(qty) - remaining,
-        "shortfall": remaining,
+        "qty_requested": needed,
+        "qty_allocated": taken,
+        "shortfall": max(0, needed - taken),
         "picks": picks,
         "rejected": rejected,
         "status": "PENDING" if picks else "IMPOSSIBLE",

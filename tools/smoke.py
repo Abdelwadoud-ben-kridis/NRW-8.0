@@ -52,7 +52,9 @@ plan = call("/api/demand", {"ref": "NY-114", "qty": 30})
 check("uncured demand refused", plan["qty_allocated"] == 0, plan["status"])
 check("rejections explained", len(plan["rejected"]) == 2,
       [r["reason"] for r in plan["rejected"]])
-call("/api/demand/cancel", {"order_id": plan["order_id"]})
+# status is IMPOSSIBLE (no picks) -- nothing was reserved, so there is
+# nothing to cancel; cancelling an IMPOSSIBLE order is refused by design
+# (backend/warehouse.py::cancel, finding F5) and would 409 here.
 
 # 3. jump past the cure
 call("/api/clock", {"jump_h": 26})
@@ -61,29 +63,28 @@ st = call("/api/state")
 check("boxes cured on their own",
       sum(1 for b in st["boxes"] if b["state"] == "READY") == 2)
 
-# 4. FIFO: oldest first, across two boxes, with the newest correctly rejected
+# 4. FIFO: oldest first, across two boxes. A box is never split (contract
+#    1.3), so covering 30 needs both whole boxes -- 22 + 18 = 40, rounding
+#    up rather than splitting BOX-2 to hand out exactly 30.
 plan = call("/api/demand", {"ref": "NY-114", "qty": 30})
-check("allocated 30", plan["qty_allocated"] == 30, plan["qty_allocated"])
+check("rounds up to 40 (never splits a box)", plan["qty_allocated"] == 40, plan["qty_allocated"])
 check("oldest box first", plan["picks"][0]["box_id"] == "BOX-1",
       [p["box_id"] for p in plan["picks"]])
 check("spans two boxes", len(plan["picks"]) == 2)
-check("takes 22 then 8", [p["take"] for p in plan["picks"]] == [22, 8],
+check("takes whole boxes 22 then 18", [p["take"] for p in plan["picks"]] == [22, 18],
       [p["take"] for p in plan["picks"]])
 
 st = call("/api/state")
 check("picked boxes are RESERVED",
       sum(1 for b in st["boxes"] if b["state"] == "RESERVED") == 2)
 
-# 5. confirm -> partial pick keeps t_in_sim, full pick empties the slot
-before = {b["box_id"]: b["t_in_sim"] for b in st["boxes"]}
+# 5. confirm -> both boxes are taken whole, so both empty and release their slot
 call("/api/demand/confirm", {"order_id": plan["order_id"]})
 st = call("/api/state")
-b2 = [b for b in st["boxes"] if b["box_id"] == "BOX-2"][0]
-check("partial pick keeps t_in_sim", b2["t_in_sim"] == before["BOX-2"])
-check("partial box back to READY", b2["state"] == "READY", b2["state"])
-check("partial qty = 10", b2["qty_available"] == 10, b2["qty_available"])
 b1 = [b for b in st["boxes"] if b["box_id"] == "BOX-1"][0]
-check("emptied box released its slot", b1["state"] == "EMPTY" and not b1["slot_id"])
+b2 = [b for b in st["boxes"] if b["box_id"] == "BOX-2"][0]
+check("BOX-1 emptied and released its slot", b1["state"] == "EMPTY" and not b1["slot_id"])
+check("BOX-2 emptied and released its slot", b2["state"] == "EMPTY" and not b2["slot_id"])
 
 # 6. quarantine path
 call("/api/reset", {})
@@ -121,7 +122,9 @@ check("first confirm applies", r1.get("already") is False, r1)
 check("second confirm is a no-op, not an error", r2.get("already") is True, r2)
 st = call("/api/state")
 box1 = [b for b in st["boxes"] if b["box_id"] == "BOX-1"][0]
-check("qty deducted exactly once", box1["qty_available"] == 30, box1["qty_available"])
+# the whole 40-core box is taken (never split, contract 1.3) -- what this
+# test is really proving is that the SECOND confirm doesn't deduct again
+check("qty deducted exactly once", box1["qty_available"] == 0, box1["qty_available"])
 
 # confirming a cancelled order is refused, not silently applied
 call("/api/reset", {})

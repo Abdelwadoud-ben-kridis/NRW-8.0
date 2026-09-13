@@ -73,6 +73,30 @@ def test_dead_barrier_is_caught():
     assert r["state"] == "QUARANTINE"
 
 
+def test_overloaded_crate_is_quarantined():
+    # ART's box_capacity is 40 -- 45 matching cores would otherwise be a
+    # clean HAUTE-confidence accept (delta 0), but no real crate holds 45
+    # when it was built for 40.
+    gross = E.TARE_G + 45 * 206.0
+    r = E.assess_box(ART, 45, gross)
+    assert not r["accepted"] and r["state"] == "QUARANTINE"
+    assert "capacite" in r["reason"] and "45" in r["reason"] and "40" in r["reason"]
+
+
+def test_exactly_at_capacity_is_accepted():
+    gross = E.TARE_G + 40 * 206.0
+    r = E.assess_box(ART, 40, gross)
+    assert r["accepted"] and r["quantity"] == 40
+
+
+def test_capacity_check_does_not_mask_a_counting_fault():
+    # delta >= 2 must still be reported as a counting fault, not relabelled
+    # as a capacity problem just because the raw beam count is also high.
+    gross = E.TARE_G + 41 * 206.0   # count_weight = 41, count_beam = 45 -> delta 4
+    r = E.assess_box(ART, 45, gross)
+    assert r["state"] == "QUARANTINE" and "ecart de comptage" in r["reason"]
+
+
 # --- criteria 5 + 6: FIFO and automatic proposal ------------------------------
 
 def test_fifo_picks_oldest_first():
@@ -111,10 +135,27 @@ def test_multi_box_allocation_and_shortfall():
     assert any(x["reason"] == "plus recent (FIFO)" for x in r["rejected"])
 
 
-def test_shortfall_is_reported():
+def test_allocation_never_splits_a_box():
+    # 25 needed; the oldest box only has 22, so covering the order requires
+    # taking BOX-2's entire 18 too -- overshooting to 40 rather than
+    # splitting BOX-2 to hand out exactly 25.
+    boxes = [_box("BOX-1", "NY-114", 1 * H, "READY", qty=22),
+             _box("BOX-2", "NY-114", 5 * H, "READY", qty=18)]
+    r = E.fifo_allocate(boxes, "NY-114", 25, 100 * H)
+    assert [p["take"] for p in r["picks"]] == [22, 18]
+    assert all(p["partial"] is False for p in r["picks"])
+    assert r["qty_allocated"] == 40 and r["shortfall"] == 0
+
+
+def test_insufficient_total_stock_refuses_the_whole_reservation():
+    # Only 5 whole-box cores exist for this ref; asking for 40 must not
+    # reserve those 5 and call it a partial success -- a box can't be split
+    # to make up the other 35, so nothing is reserved at all.
     boxes = [_box("BOX-1", "NY-114", 1 * H, "READY", qty=5)]
     r = E.fifo_allocate(boxes, "NY-114", 40, 100 * H)
-    assert r["qty_allocated"] == 5 and r["shortfall"] == 35
+    assert r["picks"] == [] and r["status"] == "IMPOSSIBLE"
+    assert r["qty_allocated"] == 0 and r["shortfall"] == 40
+    assert r["rejected"][0]["reason"] == "stock insuffisant"
 
 
 def test_quarantined_box_never_allocated():
@@ -136,6 +177,8 @@ def test_other_references_are_not_touched():
 # --- state machine -----------------------------------------------------------
 
 def test_partial_pick_keeps_t_in_sim():
+    # apply_pick itself still supports a partial take -- fifo_allocate just
+    # no longer ever generates one (see test_allocation_never_splits_a_box).
     b = _box("BOX-1", "NY-114", 5 * H, "RESERVED", qty=40)
     patch = E.apply_pick(b, 10)
     assert patch["state"] == "READY" and patch["qty_available"] == 30
