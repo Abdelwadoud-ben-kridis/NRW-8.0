@@ -1076,6 +1076,7 @@ async function boot() {
   $("btn-follow").onclick = (e) =>
     e.target.style.borderColor = toggleFollow() ? "#22d3ee" : "";
 
+  setupResizeGutters();
   connect();
   renderLog();
   refreshDbHealth();
@@ -1084,6 +1085,66 @@ async function boot() {
 }
 
 let pollTimer = null;
+
+// ---------------------------------------------------------------------------
+// resizable sections — three drag handles resize #left/#mid/#right/#inv/#log
+// against each other (gutR and gutR2 are the same visual line: mid|right in
+// the main row, inv|log in the bottom row -- one grid column, two handle
+// elements because grid-template-areas can't reuse a name split by gutH).
+// Per-card/per-block resizing (.card, .rsec) is plain CSS `resize`, no JS.
+// ---------------------------------------------------------------------------
+function setupResizeGutters() {
+  const app = $("app");
+  const KEY = "scw-panes-v1";
+  let saved;
+  try { saved = JSON.parse(localStorage.getItem(KEY)) || {}; } catch { saved = {}; }
+  const state = { left: saved.left || 296, right: saved.right || 380,
+                  bottom: saved.bottom || 260 };
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+  const apply = () => {
+    app.style.gridTemplateColumns = `${state.left}px 6px 1fr 6px ${state.right}px`;
+    app.style.gridTemplateRows = `52px 76px minmax(0,1fr) 6px ${state.bottom}px`;
+  };
+  const persist = () => {
+    try { localStorage.setItem(KEY, JSON.stringify(state)); } catch { /* per-viewer only */ }
+  };
+  apply();
+
+  function drag(el, cursorClass, move) {
+    el.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const x0 = e.clientX, y0 = e.clientY, start = { ...state };
+      el.classList.add("dragging");
+      document.body.classList.add(cursorClass);
+      const onMove = (ev) => { move(ev.clientX - x0, ev.clientY - y0, start); apply(); };
+      const onUp = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        el.classList.remove("dragging");
+        document.body.classList.remove(cursorClass);
+        persist();
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+  }
+
+  drag($("gutL"), "gut-dragging-v", (dx, _dy, start) => {
+    state.left = clamp(start.left + dx, 220, 520);
+  });
+  const dragRight = (dx, _dy, start) => { state.right = clamp(start.right - dx, 260, 640); };
+  drag($("gutR"), "gut-dragging-v", dragRight);
+  drag($("gutR2"), "gut-dragging-v", dragRight);
+  drag($("gutH"), "gut-dragging-h", (_dx, dy, start) => {
+    state.bottom = clamp(start.bottom - dy, 140, Math.round(window.innerHeight * 0.7));
+  });
+
+  window.addEventListener("resize", () => {
+    state.bottom = clamp(state.bottom, 140, Math.round(window.innerHeight * 0.7));
+    apply();
+  });
+}
 
 function startPolling() {
   if (pollTimer) return;

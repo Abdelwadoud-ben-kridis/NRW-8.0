@@ -142,6 +142,17 @@
   </div>
 
   <!-- ============================================================
+       RESIZE HANDLES — drag to resize left/mid/right/inv/log against
+       each other. gutR and gutR2 are the same visual line (mid|right in
+       the main row, inv|log in the bottom row) since grid-template-areas
+       can't reuse one area name across a row split by gutH.
+       ============================================================ -->
+  <div class="gut gut-v" id="gutL" data-gut="left"></div>
+  <div class="gut gut-v" id="gutR" data-gut="right"></div>
+  <div class="gut gut-h" id="gutH" data-gut="bottom"></div>
+  <div class="gut gut-v" id="gutR2" data-gut="right"></div>
+
+  <!-- ============================================================
        LEFT COLUMN — live operation, ESP32, curing, crane, quarantine
        ============================================================ -->
   <div id="left">
@@ -233,13 +244,15 @@
        ============================================================ -->
   <div id="right">
     <h2 id="h-byref"></h2>
-    <table id="byref" class="grid">
-      <colgroup>
-        <col style="width:66px"><col style="width:48px">
-        <col style="width:56px"><col>
-      </colgroup>
-      <thead></thead><tbody></tbody>
-    </table>
+    <div class="rsec" id="byref-wrap">
+      <table id="byref" class="grid">
+        <colgroup>
+          <col style="width:66px"><col style="width:48px">
+          <col style="width:56px"><col>
+        </colgroup>
+        <thead></thead><tbody></tbody>
+      </table>
+    </div>
 
     <h2 id="h-dem"></h2>
     <div class="row">
@@ -251,17 +264,17 @@
     <button class="primary" id="btn-demand"></button>
 
     <h2 id="h-prop"></h2>
-    <div id="order"></div>
+    <div class="rsec" id="order"></div>
     <div class="row tight">
       <button class="ghost" id="btn-confirm"></button>
       <button class="ghost" id="btn-cancel"></button>
     </div>
 
     <h2 id="h-pending"></h2>
-    <div id="pending-orders"></div>
+    <div class="rsec" id="pending-orders"></div>
 
     <h2 id="h-batches"></h2>
-    <div id="batches-pending"></div>
+    <div class="rsec" id="batches-pending"></div>
   </div>
 
   <!-- ============================================================
