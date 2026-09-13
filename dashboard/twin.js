@@ -1,8 +1,9 @@
-// twin.js — the 3D digital twin. This is criterion 7: 25 points, the single
-// heaviest item on the score sheet. Everything here is generated procedurally
-// from the slots table, so the rack costs zero CAD hours; only the crane, the
-// fork, the crate and the conveyor are expected as .glb files, and the scene
-// falls back to primitives the moment one is missing.
+// twin.js — the cosmetic 3D digital twin, part of the live dashboard
+// (criterion 8). It is NOT criterion 7 (mechanical design + animated 3D),
+// which is a separate CAD deliverable -- see README §1. Everything here is
+// generated procedurally from the slots table; only the crane, the fork, the
+// crate and the conveyor are optional .glb files, and the scene falls back to
+// primitives the moment one is missing.
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -93,12 +94,18 @@ export function initTwin(canvas, hud) {
   setCamera("iso");
   onResize();
   addEventListener("resize", onResize);
+  // The dashboard's panels are draggable (app.js::setupResizeGutters), which
+  // resizes this canvas WITHOUT a window resize event -- the drawing buffer
+  // then kept its old size and the scene rendered stretched. Watch the
+  // canvas itself.
+  if (typeof ResizeObserver !== "undefined") new ResizeObserver(onResize).observe(canvas);
   animate();
 }
 
 function onResize() {
   const c = renderer.domElement;
-  const w = c.clientWidth || 1, h = c.clientHeight || 1;
+  if (!c.clientWidth || !c.clientHeight) return;   // hidden tab: keep last size
+  const w = c.clientWidth, h = c.clientHeight;
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
@@ -417,9 +424,20 @@ export function toggleFollow() { follow = !follow; return follow; }
 
 // --- animation loop --------------------------------------------------------
 
-function animate() {
+let lastFrameT = null;
+
+function animate(now = performance.now()) {
   raf = requestAnimationFrame(animate);
-  const dt = 1 / 60;
+  // Nothing to draw while the 3D tab is hidden (the 2D rack is the default
+  // view) -- don't burn the GPU behind it.
+  if (!renderer.domElement.clientWidth) { lastFrameT = null; return; }
+
+  // Real elapsed time, not a fixed 1/60 s: at a fixed step every crate and
+  // the crane moved at (fps / 60) of their real speed -- at the ~13 fps a
+  // busy dashboard can drop to, crates took ~30 s to reach their slots and
+  // the twin looked frozen/empty. Clamped so a stalled frame can't teleport.
+  const dt = lastFrameT == null ? 1 / 60 : Math.min(0.1, Math.max(0, (now - lastFrameT) / 1000));
+  lastFrameT = now;
 
   // crane: X travel 1.2 m/s, Z lift 0.8 m/s, ease-out at both ends
   // (cores are fragile before curing -- gentle handling is a design driver)
