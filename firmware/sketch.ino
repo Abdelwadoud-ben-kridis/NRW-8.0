@@ -112,7 +112,11 @@ const float    STABLE_BAND_G   = 25.0;  // +/- noise band on the scale
 // ---------------------------------------------------------------------------
 void resetBox() {
   g_gross_g = 0; g_tare_g = 0; g_tared = false;
-  g_counting = false; g_stable = false; g_sawFinal = false; g_stableMs = 0;
+  // g_stableMs = millis(), not 0: the tare/stability timers start at
+  // start_box. With 0, "millis() - g_stableMs" is already huge, so a crate
+  // frame that beat start_box (cmd and raw are separate MQTT topics) tared
+  // at once and declared DONE on the empty crate.
+  g_counting = false; g_stable = false; g_sawFinal = false; g_stableMs = millis();
   g_done = false;
   digitalWrite(PIN_LED, LOW);
 }

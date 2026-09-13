@@ -67,7 +67,28 @@ print("l0 probe against", BASE)
 dev = subprocess.Popen([sys.executable, os.path.join("tools", "fake_device.py")],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 try:
-    time.sleep(2.0)   # let it connect and subscribe before the first arrival
+    # Wait until the backend actually receives the device's telemetry: paho
+    # drops publishes until connected, and on_connect subscribes first, so
+    # telemetry seen => subscribed. A fixed sleep raced a slow public broker:
+    # the device missed start_box, weighed the frames under its default ref
+    # and sent an unsolicited box_done, pushing the arrival itself to L1.
+    deadline = time.monotonic() + 30.0
+    while not call("/api/state")["device"].get("online"):
+        if time.monotonic() > deadline:
+            print("  FAIL fake_device never came online on the broker")
+            sys.exit(1)
+        time.sleep(0.5)
+    # Telemetry proves the connection, not that the cmd subscription is live
+    # (a start_box it misses makes it weigh under its default ref). Warm up
+    # with throwaway arrivals until one resolves L0, then start clean.
+    for _ in range(4):
+        time.sleep(1.0)
+        call("/api/reset", {})
+        if call("/api/sim/arrival", {"ref": "NY-114", "qty": 30}).get("mode") == "L0":
+            break
+    else:
+        print("  FAIL fake_device never answered a warm-up arrival in L0")
+        sys.exit(1)
 
     call("/api/reset", {})
 

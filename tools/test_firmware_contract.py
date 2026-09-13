@@ -119,7 +119,17 @@ check("onRaw() returns early once the box is reported",
      re.search(r"void onRaw\([^)]*\)\s*\{\s*if \(g_done\) return;", sketch) is not None)
 check("the activity LED is switched off again", "digitalWrite(PIN_LED, LOW)" in sketch)
 
+# resetBox() must restart the stability timer at start_box, not zero it:
+# with 0, a crate frame that arrived before start_box tared instantly and
+# the next one declared DONE on the empty crate (found before the 1.12 push).
+reset_body = re.search(r"void resetBox\(\)\s*\{(.*?)\n\}", sketch, re.S)
+check("resetBox() restarts the stability timer (g_stableMs = millis())",
+     bool(reset_body) and "g_stableMs = millis()" in reset_body.group(1)
+     and "g_stableMs = 0" not in reset_body.group(1))
+
 fake = open(os.path.join(ROOT, "tools", "fake_device.py"), encoding="utf-8").read()
+check("tools/fake_device.py reset() restarts its timer the same way",
+     "self.stable_since = time.monotonic()" in fake and "self.stable_since = 0" not in fake)
 fake_stable = re.search(r"STABLE_S\s*=\s*([\d.]+)", fake)
 check("tools/fake_device.py STABLE_S matches sketch.ino STABLE_MS",
      bool(fake_stable and stable_ms) and abs(float(fake_stable.group(1)) * 1000 - int(stable_ms)) < 1)

@@ -52,7 +52,10 @@ class FakeEsp32:
         self.counting = False
         self.stable = False
         self.saw_final = False
-        self.stable_since = 0.0   # like g_stableMs = 0
+        # like g_stableMs = millis(): the timers start at start_box. 0 made
+        # "now - stable_since" huge, so a crate frame that beat start_box
+        # across topics tared at once and declared DONE on the crate alone.
+        self.stable_since = time.monotonic()
         self.done = False
 
     # --- identical logic to firmware/sketch.ino::onRaw() ------------------
