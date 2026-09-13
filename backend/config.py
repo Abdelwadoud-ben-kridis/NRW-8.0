@@ -55,10 +55,9 @@ DB_PATH = os.environ.get("SCW_DB", os.path.join(
 
 # --- warehouse policy (contract 1.2) -----------------------------------------
 # The CDC (cahier des charges) fixes ONE drying requirement -- 24 h, the same
-# for every box, every reference, every climate. Temperature/RH are NOT a
-# CDC requirement: they are kept as monitoring/evidence only (device display,
-# stored on each box as the climate the ESP32 measured at arrival), and they
-# never feed cure math. Do not resurrect an adaptive model here.
+# for every box, every reference, every climate. There is no climate sensor
+# or input anywhere any more (contract 1.8 removed the DHT22). Do not
+# resurrect an adaptive model here.
 CURE_H = 24.0
 
 # A RESERVED box auto-releases after this many SIMULATED hours if nobody
@@ -73,10 +72,10 @@ ARRIVAL_GRACE_S = 15.0           # real seconds a late box_done can still be
                                   # window, after L1 already fired
 UNSOLICITED_DEDUP_S = 5.0        # real seconds within which an identical
                                   # unsolicited box_done (no open window,
-                                  # same ref+count_beam+gross_g+fw) is a
+                                  # same barcode+gross_g+fw) is a
                                   # repeat, not a second physical box
 DEVICE_LIVENESS_S = 5.0          # real (monotonic) seconds since the last
                                   # telemetry/box_done before the ESP32 pill
                                   # goes offline -- transport-domain, not t_sim
 
-CONTRACT_VERSION = "1.9"
+CONTRACT_VERSION = "1.10"

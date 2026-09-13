@@ -28,7 +28,7 @@ def _box(bid, ref, t_in, state, qty=40, req=24.0, **kw):
 
 def test_cure_is_fixed_24h_always():
     # CDC requirement: exactly 24 h, the same for every box. No adaptive
-    # model -- contract 1.2 dropped that idea; climate is display-only now.
+    # model -- contract 1.2 dropped that idea; 1.8 removed the climate sensor.
     assert E.required_cure_h() == 24.0
     assert E.CURE_FLOOR_H == 24.0
 

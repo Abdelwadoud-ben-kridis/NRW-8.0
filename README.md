@@ -27,11 +27,11 @@ you are never blocked by Wokwi:
 python tools/fake_device.py
 ```
 
-**The one thing to do in your first ten minutes at the venue:** open
-`backend/config.py`, change `SESSION = "nrw8"` to something unique like
-`"nrw8-teamX"`, and make the identical change to `SESSION` in
-`firmware/sketch.ino`. You are on a public MQTT broker; another team on
-`nrw8` will inject phantom boxes into your demo.
+**Session:** `SESSION` is already set to a unique value, `nrw8-scw-k7q2`,
+in both `backend/config.py` and `firmware/sketch.ino` (contract 1.10). You
+are on a public MQTT broker, so the two must stay identical and must not be
+the shared `nrw8` default — `python tools/test_firmware_contract.py` fails
+if they drift apart.
 
 ### Two traps that will cost you an hour if you hit them cold
 
@@ -42,24 +42,28 @@ python tools/fake_device.py
    time wondering why.
 2. Three.js is **vendored** in `dashboard/vendor/`. Do not "clean it up" into a
    CDN link. Venue wifi is exactly the thing that must not be able to break
-   your 25-point criterion.
+   the live dashboard.
 
 ---
 
 ## 1. What the CDC asks, and where each answer lives
 
-| # | Task (CDC §4) | Points | Where it is |
+Numbered as on the CDC's scoring sheet (*fiche de répartition des points*),
+160 points in total — 135 answered by this repo, 25 (criterion 7) by the
+separate CAD deliverable.
+
+| # | Criterion (scoring sheet) | Points | Where it is |
 |---|----------------|--------|-------------|
-| 1 | Identify the core / its model | 15 | a barcode scan (`backend/warehouse.py::register_barcode`/`create_box`) cross-checked against a simulated vision station's shape reading (`algo/engine.py::identify_core`) — two independent sensors, not a guess |
-| 2 | Deduce the quantity | 15 | `algo/engine.py::assess_box` — net weight ÷ that barcode's own registered per-noyau mass, cross-checked against the vision station's own visible-core count |
-| 3 | Register a new box, automatic timestamp | — | `backend/warehouse.py::create_box`, `t_in_sim` |
-| 4 | Track drying, ready / not ready at 24 h | 10 | `engine.required_cure_h` (fixed 24 h, contract 1.2) + the `sweep_cured` tick |
-| 5 | Classify and locate by type, quantity, storage date | 15 | `by_ref` panel + `slots` table + inventory `AGE` column |
-| 6 | Automatically propose the right box | 15 | `engine.fifo_allocate` → the proposal panel |
+| 1 | Compréhension du besoin | 10 | the CDC's own sentence mapped to one table (below) + demo beat 1 |
+| 2 | Identify the core / its model | 15 | a barcode scan (`backend/warehouse.py::register_barcode`/`create_box`) cross-checked against a simulated vision station's shape reading (`algo/engine.py::identify_core`) — two independent sensors, not a guess |
+| 3 | Deduce the quantity | 15 | `algo/engine.py::assess_box` — net weight ÷ that barcode's own registered per-noyau mass is the count; the vision station's visible-core count is a lower-bound cross-check (contract 1.10) |
+| 4 | Track drying, ready / not ready at 24 h | 10 | `engine.required_cure_h` (fixed 24 h, contract 1.2) + the `sweep_cured` tick; the box's automatic timestamp (CDC task 3) is `create_box`'s `t_in_sim` |
+| 5 | FIFO — classify and locate by type, quantity, storage date | 15 | `engine.fifo_key` + `by_ref` panel + `slots` table + inventory arrival/cure columns |
+| 6 | Automatically propose the right box | 15 | `engine.fifo_allocate` → the proposal panel, with every rejected box and why |
 | 7 | Mechanical design **and** animated 3D | **25** | **a separate CAD/3D project**, not this repo — see the note below |
 | 8 | Real-time interactive dashboard | 15 | `dashboard/index.html` + `app.js` |
 | 9 | Full embedded simulation (ESP32) | 15 | `firmware/sketch.ino` on Wokwi |
-| 10 | An innovative idea | 10 | **placeholder** — see the note below |
+| 10 | An innovative idea | 10 | see the note below — three demonstrable answers, demo beat 7 |
 | 11 | Clear presentation, fluid demo | 15 | `docs/demo-script.md` |
 
 **Criterion 7 lives in a separate CAD/3D deliverable**, not in this
@@ -74,15 +78,16 @@ could have the CAD tool poll the read-only `GET /api/slots` /
 `GET /api/state` to colour its own scene — nothing here should be built for
 that ahead of an actual request.
 
-**Criterion 10** was an open placeholder for a while (the innovation used to
-be an adaptive cure model, removed in CONTRACT VERSION 1.2 — the CDC never
-asked for it). `docs/demo-script.md` beat 7 now carries two fully-built,
-demonstrable answers: the FIFO rejected-list audit trail with the `/db`
-consistency checker, and make-to-order production batches (CONTRACT VERSION
-1.6) — when existing stock genuinely can't cover a demand, the order opens
-a tracked production batch instead of a flat refusal, and ships every box
-in it together the moment the last one clears its 24 h cure, short and
-flagged rather than blocked if one was lost to quarantine along the way.
+**Criterion 10** (the innovation used to be an adaptive cure model, removed
+in CONTRACT VERSION 1.2 — the CDC never asked for it). `docs/demo-script.md`
+beat 7 carries three fully-built, demonstrable answers: the FIFO
+rejected-list audit trail with the `/db` consistency checker; make-to-order
+production batches (CONTRACT VERSION 1.6) — when existing stock genuinely
+can't cover a demand, the order opens a tracked production batch instead of
+a flat refusal, and ships every box in it together the moment the last one
+clears its 24 h cure, short and flagged rather than blocked if one was lost
+to quarantine along the way; and a quarantine that can be recovered by a
+re-weigh, but never past what the vision station saw (contract 1.10).
 This never bypasses FIFO: any demand that CAN be met from existing stock
 still goes through the same oldest-box-first, full-audit-trail path as
 always (criteria 5/6 are graded on exactly that path, unchanged).
@@ -145,8 +150,8 @@ scw/
 │   ├── demo-script.md      the 7-minute demo, hotkeys, fallbacks, hostile Q&A
 │   └── database-guide.md   how to browse/query scw.db: DB Explorer, sqlite3, Python
 ├── algo/
-│   ├── engine.py           every decision. No I/O. ~450 lines.
-│   └── test_engine.py      40+ tests, one per scored behaviour
+│   ├── engine.py           every decision. No I/O. ~720 lines.
+│   └── test_engine.py      40 tests, one per scored behaviour
 ├── backend/
 │   ├── config.py           SESSION, broker, rack geometry, physics constants
 │   ├── db.py               schema, seeding, transactions, 306-slot rack generation
@@ -166,8 +171,8 @@ scw/
 │   │                       -- criterion 8, NOT the CAD/mechanical criterion 7)
 │   ├── db.html / db.js / db.css   the DB Explorer (`/db`)
 │   ├── vendor/             three.js r160, vendored — do not replace with a CDN
-│   └── models/             optional GLB parts for the cosmetic twin, if the
-│                           separate CAD project can export them (§5)
+│   └── models/             (not created yet) optional GLB parts for the cosmetic
+│                           twin, if the separate CAD project can export them (§5)
 ├── firmware/
 │   ├── sketch.ino          ESP32 — same file for Wokwi and the real board
 │   ├── diagram.json        Wokwi wiring — pot (load cell stand-in), an
@@ -191,11 +196,9 @@ scw/
 ## 4. The three files you will actually edit
 
 ### `dashboard/labels.js`
-The jury's language is decided at the door. Last line of the file:
-
-```js
-export const L = EN;      // change to FR and refresh. That is the whole change.
-```
+The jury's language is decided at the door: click the **EN/FR** toggle in the
+top bar (remembered per browser). The initial default is `"EN"` in
+`labels.js::_initialLang()`.
 
 Never type a user-visible string anywhere else. If you catch yourself writing
 `"Quantité"` in `index.html`, stop and put it here.
@@ -208,7 +211,7 @@ two are deliberately duplicated so the twin still draws with the backend down.
 
 ### `algo/engine.py`
 P2's territory. If you touch it, run `python algo/test_engine.py` before you
-commit. Twenty tests, half a second. There is no excuse.
+commit. 40 tests, about a second. There is no excuse.
 
 ---
 
@@ -254,7 +257,7 @@ the SSID/password in `setup()` and nothing else — same firmware, same topics.
 
 ```bash
 python algo/test_engine.py      # 40+ unit tests, no server needed
-python tools/test_backend.py    # 14 DB integration tests (throwaway SQLite
+python tools/test_backend.py    # 32 DB integration tests (throwaway SQLite
                                  # files), no server needed
 python tools/smoke.py           # end-to-end checks, backend must be running
 python tools/mqtt_probe.py      # MQTT-layer dedup/malformed-payload checks,
@@ -344,7 +347,7 @@ Since you are already at the event, read this as a priority order, not a clock.
 | Priority | Do this | Done when |
 |---|---|---|
 | 1 | `./run.sh`, open the dashboard, press S then D | you have seen the FIFO proposal with its rejection list |
-| 2 | Change `SESSION` in both files; commit | `git log` shows one commit called "demo-stable" |
+| 2 | Confirm `SESSION` (`nrw8-scw-k7q2`) is identical in both files | `python tools/test_firmware_contract.py` is ALL GREEN |
 | 3 | Send `docs/contracts.md` to P2 and P4 | both have read it and said yes |
 | 4 | Get Wokwi up with P4 and press **A** | the ESP32 pill is green and the box lands via `box_done` |
 | 5 | Run both test suites | two ALL GREENs |
@@ -371,9 +374,13 @@ reverse, because 55 of the 160 points are things the jury has to *see happen*.
   to feed one even in principle (contract 1.8 removed the DHT22 that used
   to feed the dropped adaptive model, since it had nothing left to do).
 - Two independent counts (the scale, and the simulated vision station).
-  Agreement → HAUTE. A gap of one or two → accepted at the lower figure,
-  MOYENNE. A gap of three or more, or vision naming a different reference
-  than the barcode → quarantine, no guessing.
+  The scale's count is the quantity; the camera's count is a lower bound,
+  because occlusion hides cores but never invents them. Weight inside the
+  normal noise of a box that size and the camera 0–2 cores short → HAUTE.
+  Within 2 cores but not that clean → MOYENNE, at the higher count. A gap
+  of three or more, or vision naming a different reference than the
+  barcode → quarantine, no guessing (contract 1.10; 37 × NY-114 is counted
+  exactly 99.6 % of the time, HAUTE 98.8 %).
 - FIFO is sorted on `(t_in_sim, box_id)`, with `box_id` compared as the
   number it encodes (`BOX-2` before `BOX-10`), so the same demand gives the
   same answer twice — which matters when the jury asks you to run it again.

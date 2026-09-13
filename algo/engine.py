@@ -597,7 +597,7 @@ def tick_box(box: dict, now_sim: float) -> dict | None:
     """Time-driven transitions. Returns a patch dict, or None if nothing changes.
 
     Two things happen on their own as simulated time passes:
-      * a DRYING box becomes READY when its adaptive cure time has elapsed
+      * a DRYING box becomes READY when its fixed 24 h cure has elapsed
       * a RESERVED box whose lock expired falls back to READY
     """
     st = box["state"]

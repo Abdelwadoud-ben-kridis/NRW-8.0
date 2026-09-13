@@ -3,7 +3,61 @@
 Owner: **P3 (dashboard / backend / site)**. Everyone codes against this file.
 If you change it, announce it out loud and bump the version line.
 
-    CONTRACT VERSION: 1.9
+    CONTRACT VERSION: 1.10
+
+Changes from 1.9 (pre-judging audit fixes, 2026-09-13):
+
+- **Quantity: the weight count is the quantity; vision is a lower bound**
+  (§3, `algo/engine.py::assess_box`). 1.7–1.9 accepted `min(weight,
+  vision)` whenever the weight residual failed the tight tolerance, but the
+  simulated camera can only MISS cores (occlusion), never invent them — so
+  ordinary occlusion became a systematic undercount (8.8 % of honest 37-core
+  boxes stored as 36; only 43 % read HAUTE). Now, when a vision count is
+  available: the residual is judged against the noise of a box that size,
+  `2.5·sqrt((CORE_MASS_CV·unit)²·count + SCALE_NOISE_G²)` (never tighter
+  than the zero-vision tolerance); inside that band with the camera 0–2
+  cores short → HAUTE, quantity = weight count; otherwise within 2 cores →
+  MOYENNE, quantity = max(weight, vision); a gap of 3+ or a vision/barcode
+  reference mismatch → QUARANTINE, unchanged. Calls with no vision reading
+  keep the original tight tolerance. 37 × NY-114: 99.6 % exact, 98.8 % HAUTE.
+- **A re-weigh can't clear a vision mismatch** (§2 recount, `backend/
+  warehouse.py::recount_box`). A `QUARANTINE` box whose arrival vision
+  reading named a different reference than its barcode is refused on a
+  weight-only recount (reason `"vision : ref. X detectee a la reception,
+  code-barre Y annonce Z -- relecture vision requise"`); only a recount
+  with a fresh vision reading that agrees can re-admit it. Finding: the
+  dashboard's Re-weigh button (weight only) re-admitted 65 % of
+  vision-caught mismatches at qty 37 as the declared reference. A recount
+  without a fresh reading also keeps the arrival's `vision_ref`/
+  `id_confidence` instead of nulling them.
+- **One box → one `box_done`** (§1.3, `firmware/sketch.ino`, fw tag `"1.3"`).
+  `publishBoxDone()` used to call `resetBox()` mid-arrival; the board
+  re-tared on the remaining settle frames and published a second
+  `box_done` for every box (five for an empty crate) — swallowed by the
+  backend dedup but logged as `box_done_ignored` each time. It now latches
+  `DONE` (telemetry `state: "DONE"`) and ignores raw frames until the next
+  `start_box`/`reset`. `STABLE_MS` 1200 → 2500 so the fallback timeout can
+  no longer fire inside the plant model's 1.4 s settle window, before
+  `final` arrives. The LED is switched off again. `tools/fake_device.py`
+  (tag `"fake-1.3"`) is a line-for-line mirror again — it had drifted,
+  which hid this from `tools/l0_probe.py`.
+- **Unknown reference on `POST /api/demand` → 400** (§2). It used to open an
+  `IN_PRODUCTION` batch for a part that doesn't exist. `IMPOSSIBLE` is now
+  only "nothing free to allocate".
+- **Cancelling a production batch keeps `payload.status` in sync** with the
+  `status` column (§5 already promised this). New consistency check **O6**
+  enforces it for every order (§7: 27 checks).
+- **`POST /api/scenario` leaves the clock at ×1** (`config.SCENARIO_SPEED`),
+  not ×60 — at ×60 the rehearsed numbers drifted within minutes and a
+  2 sim-h reservation lock expired after 2 real minutes. **J** moves time.
+- **`POST /api/sim/arrival` / `POST /api/sim/box`**: a non-integer `qty` or
+  one outside `[0, 500]`, or an unknown `anomaly`, is a 400 instead of a 500.
+- **Dashboard**: the demand form's "only N ready" hint is a warning, not a
+  block, so a refusal with its ETA and a production batch can be triggered
+  with **D**.
+- **`SESSION` is `nrw8-scw-k7q2`** in `backend/config.py`,
+  `firmware/sketch.ino` and `run.sh` (was the shared `nrw8`).
+- Startup banner prints the port uvicorn was actually started on.
 
 Changes from 1.8 (whole-box-only allocation again, and a reference-free
 "take the oldest ready box" convenience, 2026-09-13):
@@ -321,11 +375,11 @@ Changes from 1.1 (database/backend hardening pass, 2026-09-12):
 
 ```
  [ backend/plant.py ]  = PLANT MODEL (the physical world, server-side)
-        |               raw sensor signals (beam edge, load cell mV)
+        |               raw load-cell mV + one simulated vision reading
         v
  [ FastAPI backend ] --MQTT--> scw/sim/raw  ------> [ ESP32 (Wokwi or real) ]
-        ^                                             | debounce, tare, stability,
-        |                                             | count, delta check
+        ^                                             | tare, stability, report
+        |                                             | settled mass (once per box)
         +---MQTT--- scw/dev/telemetry ----------------+
         +---MQTT--- scw/dev/box_done  ----------------+
         |
@@ -342,9 +396,10 @@ client→server `{"type":"raw",...}` message in §3 exists as a manual
 fast path (used by `POST /api/sim/raw`) but the dashboard's own JS never
 sends it.
 
-The ESP32 is **never told the answer**. It receives raw signals only and derives
-count / mass / coherence itself. That is what makes criterion 9 (embedded, 15 pts)
-real instead of decorative.
+The ESP32 is **never told the answer**. It receives the raw load-cell signal only
+and derives the tared, settled mass itself; identity (barcode + simulated vision)
+and the count are decided one layer up, in `algo/engine.py`. That is what makes
+criterion 9 (embedded, 15 pts) real instead of decorative.
 
 MQTT broker: `broker.hivemq.com:1883` (TCP for Python, 1883 for Wokwi's
 `WiFi.begin("Wokwi-GUEST","")`). Every topic is prefixed with a **session id** so
@@ -356,8 +411,8 @@ two laptops in the same room do not collide:
     scw/<SESSION>/dev/cmd
 
 `SESSION` is set in `backend/config.py` and in `firmware/sketch.ino`. **They must
-match.** Default: `nrw8`. Change it to something unique (e.g. `nrw8-team7`) in the
-first 10 minutes at the venue.
+match.** Current value: `nrw8-scw-k7q2` (contract 1.10 — never the shared `nrw8`);
+`tools/test_firmware_contract.py` fails if the two files disagree.
 
 ---
 
@@ -384,11 +439,12 @@ Mass conversion used by BOTH sides (hard-coded constant, do not change after H2)
 ### 1.2 `scw/<S>/dev/telemetry` — ESP32 → backend, 2 Hz
 
 ```json
-{ "state":"COUNTING", "count_beam":37, "gross_g":9420.5,
-  "stable":true, "up_ms":128400 }
+{ "state":"COUNTING", "gross_g":9420.5,
+  "stable":false, "up_ms":128400, "src":"esp32" }
 ```
 
-`state` ∈ `IDLE | COUNTING | STABILIZING | DONE | FAULT`.
+`state` ∈ `IDLE | COUNTING | STABILIZING | DONE | FAULT` — `DONE` (contract
+1.10) from the moment the box is reported until the next `start_box`/`reset`.
 This is telemetry only — it drives the "live ESP32" panel on the dashboard.
 It never mutates the database.
 
@@ -397,8 +453,12 @@ It never mutates the database.
 **This is the only message that creates a box.**
 
 ```json
-{ "ref":"NY-114", "count_beam":37, "gross_g":9420.5, "fw":"1.2" }
+{ "ref":"BC-1042", "gross_g":9420.5, "fw":"1.3" }
 ```
+
+`ref` carries the scanned `barcode_id` (field name kept for firmware
+compatibility, contract 1.5). Exactly one `box_done` per physical box
+(contract 1.10), normally on the arrival's `final` frame.
 
 Backend response: run `algo.engine.assess_box(...)`, INSERT into `boxes`,
 assign a slot, broadcast over WS. If `ref` is unknown → box is created in
@@ -444,20 +504,20 @@ it never crashes the MQTT listener, and telemetry/curing keep running.
 | POST   | `/api/clock`          | `{"speed":60}` or `{"jump_h":6}`       | `{t_sim, speed}`, or `{"error":...}` (400: `speed` must be one of `config.ALLOWED_SPEEDS`, `jump_h` must be in `(0, config.MAX_JUMP_H]`) |
 | POST   | `/api/barcodes`       | `{"barcode_id":"BC-1042","ref":"NY-114","unit_mass_g":206.0}` | a worker's registration, ahead of any arrival — new row, or `{"error":...}` (400 bad/unknown ref or mass; 409 duplicate barcode_id) |
 | GET    | `/api/barcodes?unused=true` | –                                 | `[{"barcode_id","ref","unit_mass_g","registered_sim","used_by_box"}]` |
-| POST   | `/api/sim/arrival`    | `{"barcode_id":"BC-1042","qty":37,"anomaly":"none"}` or `{"ref":"NY-114",...}` (auto-registers a throwaway barcode) — optional `"batch_order_id":"ORD-3"` tags the resulting box to that production batch | plays the plant model at 10 Hz, then L0/L1 as in §0 — this is the **A** hotkey |
-| POST   | `/api/demand`         | `{"ref":"NY-114","qty":40}`            | allocation plan (§4) — `status` is `"PENDING"` (FIFO fully covered it), `"IN_PRODUCTION"` (opened a batch for the shortfall), or `"IMPOSSIBLE"` (nothing allocated, ref unknown or a demand of 0/negative); or `{"error":...}` (400: missing/invalid `ref`/`qty`) |
+| POST   | `/api/sim/arrival`    | `{"barcode_id":"BC-1042","qty":37,"anomaly":"none"}` or `{"ref":"NY-114",...}` (auto-registers a throwaway barcode) — optional `"batch_order_id":"ORD-3"` tags the resulting box to that production batch | plays the plant model at 10 Hz, then L0/L1 as in §0 — this is the **A** hotkey. 400 if `qty` is not an integer in `[0, 500]` or `anomaly` is not a key of `GET /api/anomalies` (contract 1.10) |
+| POST   | `/api/demand`         | `{"ref":"NY-114","qty":40}`            | allocation plan (§4) — `status` is `"PENDING"` (FIFO fully covered it), `"IN_PRODUCTION"` (opened a batch for the shortfall), or `"IMPOSSIBLE"` (nothing free to allocate); or `{"error":...}` (400: missing, invalid or unknown `ref` — contract 1.10 — or `qty` not a positive integer) |
 | POST   | `/api/demand/oldest`  | – (no body)                            | contract 1.9: skip picking a reference — reserves whichever `READY`, non-batch box (any reference) has the oldest `t_in_sim`, whole. Same allocation plan shape as `/api/demand`, `qty_requested` set to that box's own `qty_available` so it never overshoots itself; or `{"error":"no ready boxes"}` (404) |
 | POST   | `/api/demand/confirm` | `{"order_id":"ORD-3"}`                 | PENDING: `{"ok":true,"already":false,"qty_allocated":N}`. IN_PRODUCTION: ships every READY box tagged to the batch — `{"ok":true,"already":false,"qty_allocated":N,"target":M,"short":bool}`, or a 409 naming which boxes are still curing. Confirming an already-DONE order returns `{"ok":true,"already":true}`; confirming a CANCELLED/IMPOSSIBLE/unknown order is `{"error":...}` (409/404) |
 | POST   | `/api/demand/cancel`  | `{"order_id":"ORD-3"}`                 | PENDING: releases its picks back to READY. IN_PRODUCTION: clears `batch_id` on its boxes, returning them to general stock. Both: `{"ok":true,"already":false,"released":[box_id,...]}` — cancelling an already-CANCELLED order returns `{"ok":true,"already":true}`; cancelling a DONE/IMPOSSIBLE/unknown order is `{"error":...}` (409/404) |
 | POST   | `/api/sim/raw`        | `{"beam":0,"load_mv":1843}`            | `{ok:true}` — plant model → MQTT |
 | POST   | `/api/sim/box`        | `{"barcode_id":"BC-1042","qty":37}` or `{"ref":"NY-114",...}`, optional `"batch_order_id"` | L1 FALLBACK: create a box without the ESP32 |
 | POST   | `/api/reset`          | `{"seed":true}` (default) or `{"seed":false}` | wipe + reseed everything, or (with `seed:false`) wipe boxes/orders/events/slots/barcodes but keep the current `articles` |
-| POST   | `/api/scenario`       | `{"name":"demo"}`                      | loads the rehearsed 6-box / 34 h demo history (full reseed) — the **S** hotkey |
+| POST   | `/api/scenario`       | `{"name":"demo"}`                      | loads the rehearsed 6-box / 34 h demo history (full reseed) — the **S** hotkey. Leaves the clock at ×1 (`config.SCENARIO_SPEED`, contract 1.10) |
 | GET    | `/api/events?limit=200` | –                                    | event log |
 | GET    | `/api/db/check`       | –                                      | read-only consistency report (§7 below) |
 | GET    | `/api/db/box/{id}`    | –                                      | one box's row + slot + every event/order that names it |
 | POST   | `/api/box/{id}/archive` | –                                     | contract 1.7: `QUARANTINE`/`EMPTY` -> `ARCHIVED`, closing the box out for good -- `{"ok":true,"box_id":...,"state":"ARCHIVED"}`, or `{"error":...}` (404 unknown box, 409 wrong state) |
-| POST   | `/api/box/{id}/recount` | `{"gross_g":9420.5}`, optional `{"anomaly":"none"}` to also take a fresh simulated vision reading | contract 1.7: re-presents a `QUARANTINE` box's evidence through the same identification+quantity decision as a fresh arrival. `{"ok":true,"accepted":bool,...}` -- on success the box re-enters `DRYING` from `t_in_sim = now`; on failure it stays `QUARANTINE` with updated evidence. `{"error":...}` (404 unknown box; 409 wrong state, or no known/valid barcode to recount against) |
+| POST   | `/api/box/{id}/recount` | `{"gross_g":9420.5}`, optional `{"anomaly":"none"}` to also take a fresh simulated vision reading | contract 1.7: re-presents a `QUARANTINE` box's evidence through the same identification+quantity decision as a fresh arrival. `{"ok":true,"accepted":bool,...}` -- on success the box re-enters `DRYING` from `t_in_sim = now`; on failure it stays `QUARANTINE` with updated evidence. A box whose arrival vision reading named a different reference than its barcode is refused (`accepted: false`) unless this recount includes a fresh vision reading (contract 1.10). `{"error":...}` (404 unknown box; 409 wrong state, or no known/valid barcode to recount against) |
 
 `POST /api/articles` — `ref`, `label`, `unit_mass_g` are required; `tolerance_g`
 (default ~3 % of `unit_mass_g`) and `color` (default: next unused colour from
@@ -483,11 +543,11 @@ Server → client, one JSON object per frame, ~5 Hz:
 ```json
 {
   "type": "state",
-  "contract_version": "1.2",
+  "contract_version": "1.10",
   "t_sim": 93600.0,
-  "speed": 60,
+  "speed": 1,
   "clock_label": "J+1 02:00",
-  "device": {"online":true,"state":"COUNTING","count_beam":37,
+  "device": {"online":true,"state":"COUNTING","count_beam":0,
              "gross_g":9420.5,"last_seen_sim":93598.0},
   "kpi": {"slots_total":306,"slots_used":37,"boxes_ready":12,
           "boxes_drying":9,"boxes_quarantine":1,"cores_available":431},
@@ -523,8 +583,8 @@ Box object (this exact shape is what the 3D twin and the table both read):
 { "box_id":"BOX-12", "ref":"NY-114", "label":"Noyau culasse 114",
   "code":"BC-1042", "batch_id":null,
   "qty_initial":37, "qty_available":37, "slot_id":"F0-C3-L7",
-  "state":"DRYING", "t_in_sim":7200.0, "required_cure_h":26.4,
-  "ready_at_sim":102240.0, "cure_pct":38.5,
+  "state":"DRYING", "t_in_sim":60000.0, "required_cure_h":24.0,
+  "ready_at_sim":146400.0, "cure_pct":38.9,
   "count_beam":0, "count_weight":37, "gross_g":9420.5,
   "confidence":"HAUTE", "reason":null,
   "vision_ref":"NY-114", "id_confidence":"HAUTE",
@@ -708,7 +768,8 @@ two, so `PICKING` is never observed mid-flight. See `algo/engine.py`'s
 `PERSISTED_STATES`/`_TRANSITIONS` and `docs/database-guide.md`.
 
 `orders.status`: `PENDING → DONE | CANCELLED`, or born straight into
-`IMPOSSIBLE` (zero picks, e.g. an unknown ref). Confirming/cancelling an
+`IMPOSSIBLE` (zero picks: enough exists in the pipeline but none of it is
+free yet). An unknown ref never becomes an order — it is a 400 (contract 1.10). Confirming/cancelling an
 order already in its target state is a no-op (`{"already": true}`);
 confirming/cancelling from any other state is a 409. An expired reservation
 also lands on `CANCELLED` (event kind `order_expired`, distinct from a
@@ -787,8 +848,9 @@ to general stock instead of discarding them.
 
 ## 7. Consistency checker
 
-`GET /api/db/check` (`backend/consistency.py`) runs 29 read-only checks —
-foreign-key-style integrity, box/order state shape, lock consistency, cure
+`GET /api/db/check` (`backend/consistency.py`) runs 27 read-only checks —
+foreign-key-style integrity, box/order state shape (including O6,
+`payload.status` == `status`, contract 1.10), lock consistency, cure
 timing, article sanity — and returns `{"overall": "PASS"|"WARN"|"FAIL",
 "t_sim", "checks": [{"id","severity","count","offending","message"}]}`.
 It is exposed as a badge on the DB Explorer (`/db`). A demo, a chaos test,

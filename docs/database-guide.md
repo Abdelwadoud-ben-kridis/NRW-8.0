@@ -144,7 +144,7 @@ page (`dashboard/db.html`) backed by a read-only JSON API mounted at
 | `GET /api/db/tables` | the 5 *active* table names with row counts (`meta` is excluded from the table browser — it's whitelisted out in `dbview.py::TABLES`, but it is no longer empty: see §3) |
 | `GET /api/db/table/{name}?limit=&offset=&q=` | paged rows, newest first, `q` does a substring search across the text columns |
 | `GET /api/db/stats` | boxes by state, stock by reference, the full slot grid, event count, orders by status |
-| `GET /api/db/check` | the consistency checker (`backend/consistency.py`) — `{"overall":"PASS"\|"WARN"\|"FAIL", "checks":[...]}` over 25 checks; shown as a badge at the top of the page |
+| `GET /api/db/check` | the consistency checker (`backend/consistency.py`) — `{"overall":"PASS"\|"WARN"\|"FAIL", "checks":[...]}` over 27 checks; shown as a badge at the top of the page |
 | `GET /api/db/box/{id}` | one box's row + slot + every event/order that names it — click a `box_id` in the table browser (while viewing `boxes`) to open this |
 
 It is enforced read-only at the driver level (`PRAGMA query_only = ON` on
@@ -261,6 +261,6 @@ at the venue via "+ New reference" survives.
   reset by every `db.seed()`. Nothing else uses `meta`.
 - **When something looks wrong, run the checker before you start
   debugging by hand:** `GET /api/db/check` (or `python -m
-  backend.consistency` with the server stopped) runs 22 read-only checks
+  backend.consistency` with the server stopped) runs 27 read-only checks
   and tells you exactly which invariant broke, with the offending row ids
   — usually faster than reconstructing the bug from a raw table dump.

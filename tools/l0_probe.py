@@ -19,10 +19,11 @@ verdict as-is (mode "L0").
 This probe launches tools/fake_device.py -- the repo's own byte-identical
 stand-in for the ESP32 (see its docstring) -- as a subprocess, then drives
 one arrival per anomaly through /api/sim/arrival and checks:
-  - the arrival resolved in mode "L0" (the device answered in time), except
-    sensor_dead, where a real board legitimately never sees a beam edge
-    either and L1 is the CORRECT, expected outcome, not a failure
-  - exactly one box was created per arrival (no duplicate box_done)
+  - the arrival resolved in mode "L0" (the device answered in time)
+  - exactly one box was created per arrival
+  - the device sent exactly one box_done per arrival: no box_done_ignored
+    event at all (contract 1.10 -- the sketch used to send two per box, which
+    the backend dedup silently swallowed)
   - the box landed in the state its anomaly is supposed to produce
 
 none/mismatch/empty are scale-reading outcomes the engine is supposed to
@@ -88,6 +89,10 @@ try:
         new_boxes = [b for b in after if b["box_id"] not in {b["box_id"] for b in before}]
         state = new_boxes[0]["state"] if new_boxes else None
         check("%-12s box state == %s" % (anomaly, expect_state), state == expect_state, state)
+
+    ignored = [e for e in call("/api/events?limit=200") if e["kind"] == "box_done_ignored"]
+    check("device sent exactly one box_done per arrival (no box_done_ignored)",
+          not ignored, [e["payload"] for e in ignored])
 
     chk = call("/api/db/check")
     check("consistency checker: overall PASS after probe", chk["overall"] == "PASS",

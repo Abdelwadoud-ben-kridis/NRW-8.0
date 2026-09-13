@@ -5,11 +5,11 @@ software works perfectly. Print this. Tape it to the table.
 
 **P3 holds the keyboard. The best speaker talks. Never the same person.**
 
-**Before anything else:** change `SESSION` in `backend/config.py` AND
-`firmware/sketch.ino` from `nrw8` to something unique (e.g. `nrw8-team7`) —
-the MQTT broker is public, and the two files must match exactly. Do this
-once, at the venue, and commit it. Skipping this is the single most likely
-way another team's traffic ends up inside this demo.
+**Before anything else:** `SESSION` is `nrw8-scw-k7q2` in both
+`backend/config.py` and `firmware/sketch.ino` — the MQTT broker is public,
+and the two must match exactly. Paste the CURRENT `sketch.ino` into Wokwi
+(an older copy still says `nrw8` and will never reach the backend), and run
+`python tools/test_firmware_contract.py` once at the venue.
 
 Before the jury walks up:
 
@@ -20,6 +20,10 @@ python tools/fake_device.py    # terminal 2 — only if Wokwi is not up
 
 Then press **S** (load demo scenario) and **1** (iso camera). The rack must
 never be empty when they arrive. Six boxes, 34 simulated hours, three cured.
+**S leaves the clock at ×1** (real time), so every number below still holds
+twenty minutes later; time moves on stage only when you press **J**. Don't
+switch to ×60 — BOX-4 would cure within a minute and the script's numbers
+stop matching the screen.
 
 ---
 
@@ -30,10 +34,10 @@ never be empty when they arrive. Six boxes, 34 simulated hours, three cured.
 | 1 | 0:40 | "A foundry core is sand, resin and catalyst. It must dry 24 hours before moulding. Today SOPAL tracks that zone by hand: plastic crates, no traceability. We turned it into a warehouse that sees, counts, remembers and decides." | nothing — let the 3D turn |
 | 2 | 0:40 | "This is the real 6 by 6 by 6 metre room. Single-aisle stacker crane, 2 faces, 9 columns, 17 levels: **306 slots**, 93 % of the floor length and 80 % of the height." | **1** iso, then **4** top, back to **1** |
 | 3 | 1:30 | "Before a box ever reaches the conveyor, a worker labels it and registers what it holds — a reference and that specific box's own per-noyau weight — right here in the dashboard. No one counts anything by hand; that registration is the only human input in the whole chain. The box arrives, its scanner reads the barcode back — a lookup, not a guess — then it loads onto the scale AND passes a vision station: two independent sensors on the way in. That raw weight goes over MQTT to the ESP32 — **the board is never told the answer**, it just tares, waits for the mass to settle, and reports. Watch its own OLED — that's the board's own view of the same weighing, live." | register a barcode, then **A** (box arrives) — point at the Wokwi OLED as it moves TARE → WEIGHING → STABLE |
-| 4 | 0:50 | "Net weight ÷ that barcode's own registered per-noyau weight = 37, a clean division, and the vision station's own shape reading confirms it really is an NY-114 — confidence HAUTE on both identity and count. The crane stores it and the clock starts — automatic timestamp, criterion 3." | point at the ESP32 pill, the vision-id readout, the new crate, and its barcode in the inventory row |
-| 5 | 1:00 | "Now the anomaly. Same barcode, but the physical cores don't match what it promised — swapped after labelling." → *pick "mismatch"* → "Watch: even when the weight alone could coincidentally look clean for some quantities, the camera sees a shape that doesn't match this barcode's declared reference, so it's **quarantined** immediately. It never enters stock." | pick the anomaly, **A** |
+| 4 | 0:50 | "Net weight ÷ that barcode's own registered per-noyau weight = 37 — the scale's count is the quantity. The vision station confirms the shape really is an NY-114, and its own core count can only come in at or under the scale's, never over, because a camera can miss a core hidden behind another but can't invent one. Confidence HAUTE on both identity and count. The crane stores it and the clock starts — automatic timestamp." (If it reads MOYENNE: "the numbers were within two cores but not clean enough to call HAUTE — it says so instead of pretending.") | point at the ESP32 pill, the vision-id readout, the new crate, and its barcode in the inventory row |
+| 5 | 1:00 | "Now the anomaly. A crate labelled NY-114, but the physical cores inside don't match what its barcode promised — swapped after labelling." → *pick "mismatch"* → "Watch: even when the weight alone could coincidentally look clean for some quantities, the camera sees a shape that doesn't match this barcode's declared reference, so it's **quarantined** immediately. It never enters stock." | pick the anomaly, **A** |
 | 6 | 1:30 | "Production needs 60 NY-114." → press **D** → "The system proposes BOX-1, then BOX-3 — oldest first, and always a **whole box**, never split: no crate gets cut in half on a spreadsheet, so if that lands a little over 60, it says so plainly rather than pretending to a precision the physical warehouse doesn't have. And here is the part that matters: **it tells you what it refused and why**. BOX-5 is rejected, not because it is newer, but because it still needs 9 hours of drying — and if the pipeline can't cover it at all, the panel names exactly when it will." | **D**, then **C** to confirm — **confirm before doing anything else**: a reservation auto-releases after 2 simulated hours (`LOCK_TTL_H`), and pressing **J** in beat 7 jumps +6 h, which would expire an unconfirmed order in full view of the jury |
-| 7 | 1:00 | "Three ideas for criterion 10. First: the system tells you not just what it will do, but **exactly why it refused everything else** — the FIFO rejected list, per box, per reason — and a built-in consistency checker (`/db`, the green PASS badge) proves the database itself is never in an inconsistent state, live, on demand. Second: when a demand can't be covered by existing stock at all — not just curing, genuinely absent — the system doesn't just refuse it. It opens a production batch, tracks it, and **ships itself automatically** the moment the last box finishes curing — no partial shipments, no manual bookkeeping. Third: quarantine isn't a dead end. A box flagged over a bad weighing can be **re-weighed on the spot** and re-enters the cure cycle the moment the numbers check out, instead of sitting there forever." | **J** (+6 h) to show a DRYING box crossing to READY (watch the banner); open `/db` to show the consistency badge; press **D** for a reference with zero stock to show a batch open — it ships itself on the next **J**, no button needed; open the quarantine panel and re-weigh a flagged box |
+| 7 | 1:30 | "Three ideas for criterion 10. First: the system tells you not just what it will do, but **exactly why it refused everything else** — the FIFO rejected list, per box, per reason — and a built-in consistency checker (`/db`, the green PASS badge) proves the database itself is never in an inconsistent state, live, on demand. Second: when a demand can't be covered by existing stock at all — not just curing, genuinely absent — the system doesn't just refuse it. It opens a production batch, tracks what's produced for it, and **ships itself automatically** the moment the last box finishes curing — no manual bookkeeping. Third: quarantine isn't a dead end, but it isn't a loophole either. A box flagged over a bad weighing can be re-weighed back into the cure cycle — but watch what happens when I try that on the crate the camera caught: **a re-weigh can't clear what the vision station saw.** It needs a fresh vision reading, so we archive it." | **J** (+6 h): BOX-4 crosses to READY (watch the banner). Open `/db`: PASS badge. Batch: set the demand to **NY-220 × 60** and press **D** (only 24 ready, 24 in the whole pipeline) → "opened as a production batch"; in the Production batches panel press **Produce a box** (qty 60) → the box arrives and starts curing; press **J** four times (+24 h) → banner "expédié automatiquement", no button. Quarantine: on the beat-5 box press **Re-weigh** → refused, reason names the vision reading → press **Archive**. |
 
 Close: *"Everything you saw ran live. No video, no slides. The embedded board,
 the warehouse logic and the 3D are three separate programs talking over MQTT
@@ -48,6 +52,10 @@ A  box arrives        D  production demand     C  confirm the pick
 J  +6 simulated hours S  load the demo scenario R  reset
 1  iso   2  aisle   3  front   4  top
 ```
+
+**D** is never blocked by the "only N ready" hint — it is a warning. Asking
+for more than is ready is how you show a refusal with its ETA, or a
+production batch.
 
 ---
 
@@ -80,12 +88,15 @@ not notice; neither will they.
 **"Dividing weight by unit mass is fragile — cores vary."**
 > It used to be — a fixed tolerance either missed real mismatches for some
 > quantities or wrongly quarantined honest boxes at realistic per-core
-> variance. That's why there are now two independent measurements: the
-> per-noyau weight registered on the SPECIFIC physical box's own barcode
-> (not a shared article average), and the vision station's own visible-core
-> count. When they agree, or are off by at most one or two, the box is
-> accepted at the more conservative figure; a bigger gap, or vision naming
-> a different reference entirely, quarantines it rather than guessing.
+> variance. So the division uses the per-noyau weight registered on the
+> SPECIFIC physical box's own barcode (not a shared article average), its
+> leftover is judged against the normal noise of a box that size (~3 % per
+> core), and the vision station's own visible-core count cross-checks it.
+> The camera count is a lower bound — it can miss a hidden core, never
+> invent one — so it confirms the scale rather than overriding it. A gap of
+> three or more cores, or vision naming a different reference entirely,
+> quarantines the box rather than guessing. On 37 × NY-114 that's exact
+> 99.6 % of the time.
 
 **"Your rack has no physical FIFO mechanism."**
 > Deliberately. Gravity-flow lanes force FIFO but need two access faces, which
